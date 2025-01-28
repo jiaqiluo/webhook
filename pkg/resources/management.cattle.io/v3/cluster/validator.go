@@ -24,6 +24,11 @@ import (
 	authorizationv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 )
 
+const (
+	VersionManagementAnno    = "rancher.io/imported-cluster-version-management"
+	VersionManagementFeature = "imported-cluster-version-management"
+)
+
 var parsedRangeLessThan123 = semver.MustParseRange("< 1.23.0-rancher0")
 
 // NewValidator returns a new validator for management clusters.
@@ -31,12 +36,14 @@ func NewValidator(
 	sar authorizationv1.SubjectAccessReviewInterface,
 	cache v3.PodSecurityAdmissionConfigurationTemplateCache,
 	userCache v3.UserCache,
+	featureCache v3.FeatureCache,
 ) *Validator {
 	return &Validator{
 		admitter: admitter{
-			sar:       sar,
-			psact:     cache,
-			userCache: userCache, // userCache is nil for downstream clusters.
+			sar:          sar,
+			psact:        cache,
+			userCache:    userCache,    // userCache is nil for downstream clusters.
+			featureCache: featureCache, // featureCache is nil for downstream clusters.
 		},
 	}
 }
@@ -69,9 +76,10 @@ func (v *Validator) Admitters() []admission.Admitter {
 }
 
 type admitter struct {
-	sar       authorizationv1.SubjectAccessReviewInterface
-	psact     v3.PodSecurityAdmissionConfigurationTemplateCache
-	userCache v3.UserCache
+	sar          authorizationv1.SubjectAccessReviewInterface
+	psact        v3.PodSecurityAdmissionConfigurationTemplateCache
+	userCache    v3.UserCache
+	featureCache v3.FeatureCache
 }
 
 // Admit handles the webhook admission request sent to this webhook.
@@ -105,6 +113,21 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 		} else if request.Operation == admissionv1.Update {
 			if fieldErr := common.CheckCreatorAnnotationsOnUpdate(oldCluster, newCluster); fieldErr != nil {
 				return admission.ResponseBadRequest(fieldErr.Error()), nil
+			}
+		}
+	}
+	// The following checks don't make sense for downstream clusters (featureCache == nil)
+	if a.featureCache != nil {
+		if request.Operation == admissionv1.Create || request.Operation == admissionv1.Update {
+			// Validate the version management feature on imported RKE2/K3s cluster
+			if newCluster.Status.Driver == apisv3.ClusterDriverRke2 || newCluster.Status.Driver == apisv3.ClusterDriverK3s {
+				response, err = a.validateVersionManagementFeature(newCluster)
+				if err != nil {
+					return nil, fmt.Errorf("failed to validate the version management feature for cluster %s: %w", newCluster.Name, err)
+				}
+				if !response.Allowed {
+					return response, nil
+				}
 			}
 		}
 	}
@@ -288,4 +311,67 @@ func (a *admitter) checkPSAConfigOnCluster(cluster *apisv3.Cluster) (*admissionv
 	}
 
 	return admission.ResponseAllowed(), nil
+}
+
+// validateVersionManagementFeature checks if the relevant configuration fields (Rke2Config or K3sConfig) are present,
+// depending on whether the version management feature is enabled for the given cluster.
+func (a *admitter) validateVersionManagementFeature(newCluster *apisv3.Cluster) (*admissionv1.AdmissionResponse, error) {
+	var enableMSUC bool
+	// determine whether the feature is enabled or not
+	switch newCluster.Annotations[VersionManagementAnno] {
+	case "true":
+		enableMSUC = true
+	case "false":
+		enableMSUC = false
+	case "system-default":
+		f, err := a.featureCache.Get(VersionManagementFeature)
+		if err != nil {
+			return nil, err
+		}
+		enableMSUC = isEnabled(f)
+	default:
+		f, err := a.featureCache.Get(VersionManagementFeature)
+		if err != nil {
+			return nil, err
+		}
+		enableMSUC = isEnabled(f)
+	}
+
+	if enableMSUC {
+		switch newCluster.Status.Driver {
+		case apisv3.ClusterDriverRke2:
+			if newCluster.Spec.Rke2Config == nil {
+				return admission.ResponseBadRequest("Spec.RKE2Config is missing"), nil
+			}
+		case apisv3.ClusterDriverK3s:
+			if newCluster.Spec.K3sConfig == nil {
+				return admission.ResponseBadRequest("Spec.K3sConfig is missing"), nil
+			}
+		}
+	} else {
+		switch newCluster.Status.Driver {
+		case apisv3.ClusterDriverRke2:
+			if newCluster.Spec.Rke2Config != nil {
+				return admission.ResponseBadRequest("Spec.RKE2Config should not exist"), nil
+			}
+		case apisv3.ClusterDriverK3s:
+			if newCluster.Spec.K3sConfig != nil {
+				return admission.ResponseBadRequest("Spec.K3sConfig should not exist"), nil
+			}
+		}
+	}
+	return admission.ResponseAllowed(), nil
+}
+
+func isEnabled(feature *apisv3.Feature) bool {
+	if feature == nil {
+		return false
+	}
+	if feature.Status.LockedValue != nil {
+		return *feature.Status.LockedValue
+	}
+	if feature.Spec.Value == nil {
+		return feature.Status.Default
+	}
+	return *feature.Spec.Value
 }

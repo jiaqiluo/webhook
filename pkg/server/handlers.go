@@ -35,14 +35,17 @@ import (
 // Validation returns a list of all ValidatingAdmissionHandlers used by the webhook.
 func Validation(clients *clients.Clients) ([]admission.ValidatingAdmissionHandler, error) {
 	var userCache v3.UserCache
+	var featureCache v3.FeatureCache
 	if clients.MultiClusterManagement {
 		userCache = clients.Management.User().Cache()
+		featureCache = clients.Management.Feature().Cache()
 	}
 
 	clusters := managementCluster.NewValidator(
 		clients.K8s.AuthorizationV1().SubjectAccessReviews(),
 		clients.Management.PodSecurityAdmissionConfigurationTemplate().Cache(),
 		userCache,
+		featureCache,
 	)
 
 	handlers := []admission.ValidatingAdmissionHandler{
@@ -90,7 +93,6 @@ func Validation(clients *clients.Clients) ([]admission.ValidatingAdmissionHandle
 func Mutation(clients *clients.Clients) ([]admission.MutatingAdmissionHandler, error) {
 	mutators := []admission.MutatingAdmissionHandler{
 		provisioningCluster.NewProvisioningClusterMutator(clients.Core.Secret(), clients.Management.PodSecurityAdmissionConfigurationTemplate().Cache()),
-		managementCluster.NewManagementClusterMutator(clients.Management.PodSecurityAdmissionConfigurationTemplate().Cache()),
 		fleetworkspace.NewMutator(clients),
 		&machineconfig.Mutator{},
 	}
@@ -99,7 +101,10 @@ func Mutation(clients *clients.Clients) ([]admission.MutatingAdmissionHandler, e
 		secrets := secret.NewMutator(clients.RBAC.Role(), clients.RBAC.RoleBinding())
 		projects := project.NewMutator(clients.Management.RoleTemplate().Cache())
 		grbs := globalrolebinding.NewMutator(clients.Management.GlobalRole().Cache())
-		mutators = append(mutators, secrets, projects, grbs)
+		clusters := managementCluster.NewManagementClusterMutator(clients.Management.PodSecurityAdmissionConfigurationTemplate().Cache(),
+			clients.Management.Feature().Cache())
+
+		mutators = append(mutators, secrets, projects, grbs, clusters)
 	}
 
 	return mutators, nil
