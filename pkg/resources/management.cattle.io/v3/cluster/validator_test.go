@@ -52,25 +52,24 @@ func TestAdmit(t *testing.T) {
 		return nil, apierrors.NewNotFound(schema.GroupResource{}, name)
 	}).AnyTimes()
 
-	featureCache := fake.NewMockNonNamespacedCacheInterface[*v3.Feature](ctrl)
-	featureCache.EXPECT().Get(gomock.Any()).DoAndReturn(func(name string) (*v3.Feature, error) {
-		if name == VersionManagementFeature {
-			return &v3.Feature{
-				Status: v3.FeatureStatus{
-					Default: true,
-				},
+	settingCache := fake.NewMockNonNamespacedCacheInterface[*v3.Setting](ctrl)
+	settingCache.EXPECT().Get(gomock.Any()).DoAndReturn(func(name string) (*v3.Setting, error) {
+		if name == VersionManagementSetting {
+			return &v3.Setting{
+				Value: "true",
 			}, nil
 		}
 		return nil, apierrors.NewNotFound(schema.GroupResource{}, name)
 	}).AnyTimes()
 
 	tests := []struct {
-		name           string
-		oldCluster     v3.Cluster
-		newCluster     v3.Cluster
-		operation      admissionv1.Operation
-		expectAllowed  bool
-		expectedReason metav1.StatusReason
+		name                 string
+		oldCluster           v3.Cluster
+		newCluster           v3.Cluster
+		operation            admissionv1.Operation
+		expectAllowed        bool
+		expectedReason       metav1.StatusReason
+		expectContainWarning bool
 	}{
 		{
 			name:          "Create",
@@ -321,19 +320,9 @@ func TestAdmit(t *testing.T) {
 			expectAllowed:  true,
 			expectedReason: metav1.StatusReasonBadRequest,
 		},
-		{
-			name:      "Delete local cluster where Rancher is deployed",
-			operation: admissionv1.Delete,
-			oldCluster: v3.Cluster{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "local",
-				},
-			},
-			expectAllowed: false,
-		},
 		// Test cases for the version management feature
 		{
-			name:      "cluster version management - valid cluster, disable by annotation, create",
+			name:      "cluster version management - imported RKE2 cluster,valid annotation, create",
 			operation: admissionv1.Create,
 			newCluster: v3.Cluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -347,71 +336,107 @@ func TestAdmit(t *testing.T) {
 			},
 			expectAllowed: true,
 		},
+
 		{
-			name:      "cluster version management - valid cluster, disable by annotation, update",
-			operation: admissionv1.Update,
+			name:      "cluster version management - imported RKE2 cluster,no annotation, create",
+			operation: admissionv1.Create,
+			newCluster: v3.Cluster{
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverRke2,
+				},
+			},
+			expectAllowed:  false,
+			expectedReason: metav1.StatusReasonBadRequest,
+		},
+		{
+			name:      "cluster version management - imported K3s cluster,valid annotation, create",
+			operation: admissionv1.Create,
 			newCluster: v3.Cluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
+						VersionManagementAnno: "true",
+					},
+				},
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverK3s,
+				},
+			},
+			expectAllowed: true,
+		},
+		{
+			name:      "cluster version management - imported K3s cluster,valid annotation, update",
+			operation: admissionv1.Update,
+			oldCluster: v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
 						VersionManagementAnno: "false",
+					},
+				},
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverK3s,
+				},
+			},
+			newCluster: v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "system-default",
+					},
+				},
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverK3s,
+				},
+			},
+			expectAllowed: true,
+		},
+		{
+			name:      "cluster version management - imported K3s cluster,drop annotation, update",
+			operation: admissionv1.Update,
+			oldCluster: v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "system-default",
+					},
+				},
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverK3s,
+				},
+			},
+			newCluster: v3.Cluster{
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverK3s,
+				},
+			},
+			expectAllowed:  false,
+			expectedReason: metav1.StatusReasonBadRequest,
+		},
+		{
+			name:      "cluster version management - imported RKE2 cluster,invalid annotation, update",
+			operation: admissionv1.Update,
+			oldCluster: v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "false",
+					},
+				},
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverK3s,
+				},
+			},
+			newCluster: v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "INVALID",
 					},
 				},
 				Status: v3.ClusterStatus{
 					Driver: v3.ClusterDriverRke2,
 				},
 			},
-			expectAllowed: true,
-		},
-		{
-			name:      "cluster version management - valid cluster, disable by annotation, contain .Spec.K3sConfig",
-			operation: admissionv1.Update,
-			newCluster: v3.Cluster{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{
-						VersionManagementAnno: "false",
-					},
-				},
-				Status: v3.ClusterStatus{
-					Driver: v3.ClusterDriverK3s,
-				},
-				Spec: v3.ClusterSpec{
-					K3sConfig: &v3.K3sConfig{
-						Version: "v1.30.8+k3s1",
-					},
-				},
-			},
 			expectAllowed:  false,
 			expectedReason: metav1.StatusReasonBadRequest,
 		},
 		{
-			name:      "cluster version management - valid cluster, enable by global feature",
-			operation: admissionv1.Update,
-			newCluster: v3.Cluster{
-				Status: v3.ClusterStatus{
-					Driver: v3.ClusterDriverK3s,
-				},
-				Spec: v3.ClusterSpec{
-					K3sConfig: &v3.K3sConfig{
-						Version: "v1.30.8+k3s1",
-					},
-				},
-			},
-			expectAllowed: true,
-		},
-		{
-			name:      "cluster version management - valid cluster, enable by global feature, miss .Spec.K3sConfig",
-			operation: admissionv1.Update,
-			newCluster: v3.Cluster{
-				Status: v3.ClusterStatus{
-					Driver: v3.ClusterDriverK3s,
-				},
-			},
-			expectAllowed:  false,
-			expectedReason: metav1.StatusReasonBadRequest,
-		},
-
-		{
-			name:      "cluster version management - cluster type not k3s or rke2",
+			name:      "cluster version management - invalid cluster type, valid annotation, create",
 			operation: admissionv1.Create,
 			newCluster: v3.Cluster{
 				ObjectMeta: metav1.ObjectMeta{
@@ -423,7 +448,29 @@ func TestAdmit(t *testing.T) {
 					Driver: v3.ClusterDriverAKS,
 				},
 			},
-			expectAllowed: true,
+			expectAllowed:        true,
+			expectContainWarning: true,
+		},
+		{
+			name:      "cluster version management - invalid cluster type, invalid annotation, update",
+			operation: admissionv1.Create,
+			oldCluster: v3.Cluster{
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverAKS,
+				},
+			},
+			newCluster: v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "INVALID",
+					},
+				},
+				Status: v3.ClusterStatus{
+					Driver: v3.ClusterDriverAKS,
+				},
+			},
+			expectAllowed:        true,
+			expectContainWarning: true,
 		},
 	}
 
@@ -431,9 +478,9 @@ func TestAdmit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			v := &Validator{
 				admitter: admitter{
-					sar:          &mockReviewer{},
-					userCache:    userCache,
-					featureCache: featureCache,
+					sar:       &mockReviewer{},
+					userCache: userCache,
+					settings:  settingCache,
 				},
 			}
 
@@ -464,95 +511,105 @@ func TestAdmit(t *testing.T) {
 					assert.Equal(t, tt.expectedReason, res.Result.Reason)
 				}
 			}
+			if tt.expectContainWarning {
+				assert.NotEmpty(t, res.Warnings)
+			}
 		})
 	}
 }
 
-func TestIsEnabled(t *testing.T) {
+func Test_versionManagementEnabled(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	settingCache := fake.NewMockNonNamespacedCacheInterface[*v3.Setting](ctrl)
+	settingCache.EXPECT().Get(gomock.Any()).DoAndReturn(func(name string) (*v3.Setting, error) {
+		if name == VersionManagementSetting {
+			return &v3.Setting{
+				Value: "true",
+			}, nil
+		}
+		return nil, apierrors.NewNotFound(schema.GroupResource{}, name)
+	}).AnyTimes()
+
 	tests := []struct {
-		name     string
-		feature  *v3.Feature
-		expected bool
+		name         string
+		cluster      *v3.Cluster
+		expectError  bool
+		expectResult bool
 	}{
 		{
-			name:     "Feature is nil",
-			feature:  nil,
-			expected: false,
+			name:         "nil cluster",
+			cluster:      nil,
+			expectError:  true,
+			expectResult: false,
 		},
 		{
-			name: "LockedValue is set",
-			feature: &v3.Feature{
-				Status: v3.FeatureStatus{
-					LockedValue: boolPtr(true),
+			name: "no annotation",
+			cluster: &v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "cluster",
 				},
 			},
-			expected: true,
+			expectError:  true,
+			expectResult: false,
 		},
 		{
-			name: "Value is nil, should use Default",
-			feature: &v3.Feature{
-				Spec: v3.FeatureSpec{
-					Value: nil,
-				},
-				Status: v3.FeatureStatus{
-					Default: true,
+			name: "annotation value false",
+			cluster: &v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "false",
+					},
 				},
 			},
-			expected: true,
+			expectError:  false,
+			expectResult: false,
 		},
 		{
-			name: "Value is nil and Default is false",
-			feature: &v3.Feature{
-				Spec: v3.FeatureSpec{
-					Value: nil,
-				},
-				Status: v3.FeatureStatus{
-					Default: false,
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "Value is set to true",
-			feature: &v3.Feature{
-				Spec: v3.FeatureSpec{
-					Value: boolPtr(true),
+			name: "annotation value true",
+			cluster: &v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "true",
+					},
 				},
 			},
-			expected: true,
-		},
-		{
-			name: "Value is set to false",
-			feature: &v3.Feature{
-				Spec: v3.FeatureSpec{
-					Value: boolPtr(false),
+			expectError:  false,
+			expectResult: true,
+		}, {
+			name: "annotation value system-default",
+			cluster: &v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "system-default",
+					},
 				},
 			},
-			expected: false,
-		},
-		{
-			name: "Value is set to false and Default is true",
-			feature: &v3.Feature{
-				Spec: v3.FeatureSpec{
-					Value: boolPtr(false),
-				},
-				Status: v3.FeatureStatus{
-					Default: true,
+			expectError:  false,
+			expectResult: true,
+		}, {
+			name: "annotation value invalid",
+			cluster: &v3.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						VersionManagementAnno: "INVALID",
+					},
 				},
 			},
-			expected: false,
+			expectError:  true,
+			expectResult: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isEnabled(tt.feature)
-			assert.Equal(t, tt.expected, result)
+			a := &admitter{
+				settings: settingCache,
+			}
+			got, err := a.versionManagementEnabled(tt.cluster)
+			if tt.expectError {
+				assert.Error(t, err)
+			}
+			assert.Equal(t, tt.expectResult, got)
 		})
 	}
-}
-
-// Helper function to return a pointer to a boolean
-func boolPtr(b bool) *bool {
-	return &b
 }

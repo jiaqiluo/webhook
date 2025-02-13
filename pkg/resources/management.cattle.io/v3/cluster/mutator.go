@@ -23,17 +23,15 @@ var managementGVR = schema.GroupVersionResource{
 	Resource: "clusters",
 }
 
-func NewManagementClusterMutator(psactCache v3.PodSecurityAdmissionConfigurationTemplateCache, featureCache v3.FeatureCache) *ManagementClusterMutator {
+func NewManagementClusterMutator(cache v3.PodSecurityAdmissionConfigurationTemplateCache) *ManagementClusterMutator {
 	return &ManagementClusterMutator{
-		psact:   psactCache,
-		feature: featureCache,
+		psact: cache,
 	}
 }
 
 // ManagementClusterMutator implements admission.MutatingAdmissionWebhook.
 type ManagementClusterMutator struct {
-	psact   v3.PodSecurityAdmissionConfigurationTemplateCache
-	feature v3.FeatureCache
+	psact v3.PodSecurityAdmissionConfigurationTemplateCache
 }
 
 // GVR returns the GroupVersionKind for this CRD.
@@ -71,10 +69,8 @@ func (m *ManagementClusterMutator) Admit(request *admission.Request) (*admission
 	if err != nil {
 		return nil, fmt.Errorf("failed to mutate PSACT: %w", err)
 	}
-	err = m.mutateVersionManagement(newCluster, request.Operation)
-	if err != nil {
-		return nil, fmt.Errorf("failed to mutate VersionManagement: %w", err)
-	}
+
+	m.mutateVersionManagement(newCluster, request.Operation)
 
 	response := &admissionv1.AdmissionResponse{}
 	// we use the re-marshalled new cluster to make sure that the patch doesn't drop "unknown" fields which were
@@ -109,19 +105,17 @@ func (m *ManagementClusterMutator) mutatePSACT(oldCluster, newCluster *apisv3.Cl
 		}
 		return nil
 	}
-	if operation == admissionv1.Update {
+
+	if operation == admissionv1.Update && oldTemplateName != "" {
 		// It is a valid use case where user switches from using PSACT to putting a PluginConfig for PSA under kube-api.AdmissionConfiguration,
 		// but it is not a valid use case where the PluginConfig for PSA has the same content as the one in the previous-set PSACT,
 		// so we need to drop it in this case.
-		if oldTemplateName != "" {
-			newConfig, found := psa.GetPluginConfigFromCluster(newCluster)
-			if found {
-				// found means there is a Plugin Config for PSA under the kube-api.admission_configuration section
-				oldConfig, _ := psa.GetPluginConfigFromCluster(oldCluster)
-				if reflect.DeepEqual(newConfig, oldConfig) {
-					psa.DropPSAPluginConfigFromAdmissionConfig(newCluster)
-					return nil
-				}
+		if newConfig, found := psa.GetPluginConfigFromCluster(newCluster); found {
+			// found means there is a Plugin Config for PSA under the kube-api.admission_configuration section
+			oldConfig, _ := psa.GetPluginConfigFromCluster(oldCluster)
+			if reflect.DeepEqual(newConfig, oldConfig) {
+				psa.DropPSAPluginConfigFromAdmissionConfig(newCluster)
+				return nil
 			}
 		}
 	}
@@ -156,69 +150,19 @@ func (m *ManagementClusterMutator) setPSAConfig(cluster *apisv3.Cluster) error {
 	return nil
 }
 
-// mutateVersionManagement sets or removes specific configuration fields (`Rke2Config` or `K3sConfig`)
-// depending on whether the version management feature is enabled for the given cluster.
-func (m *ManagementClusterMutator) mutateVersionManagement(new *apisv3.Cluster, operation admissionv1.Operation) error {
-	if new.Status.Driver != apisv3.ClusterDriverRke2 && new.Status.Driver != apisv3.ClusterDriverK3s {
-		return nil
-	}
+// mutateVersionManagement set the annotation for version management if it is missing or has empty value on an imported RKE2/K3s cluster,
+func (m *ManagementClusterMutator) mutateVersionManagement(cluster *apisv3.Cluster, operation admissionv1.Operation) {
 	if operation != admissionv1.Update && operation != admissionv1.Create {
-		return nil
+		return
+	}
+	val, ok := cluster.Annotations[VersionManagementAnno]
+	driver := cluster.Status.Driver
+
+	if driver == apisv3.ClusterDriverRke2 || driver == apisv3.ClusterDriverK3s {
+		if !ok || val == "" {
+			cluster.Annotations[VersionManagementAnno] = "system-default"
+		}
 	}
 
-	// determine whether the feature is enabled or not
-	var enable bool
-	switch new.Annotations[VersionManagementAnno] {
-	case "true":
-		enable = true
-	case "false":
-		enable = false
-	case "system-default":
-		f, err := m.feature.Get(VersionManagementFeature)
-		if err != nil {
-			return err
-		}
-		enable = isEnabled(f)
-	default:
-		f, err := m.feature.Get(VersionManagementFeature)
-		if err != nil {
-			return err
-		}
-		enable = isEnabled(f)
-	}
-
-	if enable {
-		switch new.Status.Driver {
-		case apisv3.ClusterDriverRke2:
-			if new.Spec.Rke2Config == nil {
-				// add the field only if it is missing
-				new.Spec.Rke2Config = &apisv3.Rke2Config{}
-				new.Spec.Rke2Config.SetStrategy(1, 1)
-				if new.Status.Version != nil {
-					new.Spec.Rke2Config.Version = new.Status.Version.String()
-				}
-				return nil
-			}
-		case apisv3.ClusterDriverK3s:
-			if new.Spec.K3sConfig == nil {
-				// add the field only if it is missing
-				new.Spec.K3sConfig = &apisv3.K3sConfig{}
-				new.Spec.K3sConfig.SetStrategy(1, 1)
-				if new.Status.Version != nil {
-					new.Spec.K3sConfig.Version = new.Status.Version.String()
-				}
-				return nil
-			}
-		}
-	} else {
-		switch new.Status.Driver {
-		case apisv3.ClusterDriverRke2:
-			new.Spec.Rke2Config = nil
-			return nil
-		case apisv3.ClusterDriverK3s:
-			new.Spec.K3sConfig = nil
-			return nil
-		}
-	}
-	return nil
+	return
 }
