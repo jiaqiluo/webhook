@@ -62,7 +62,7 @@ func (v *Validator) Operations() []admissionregistrationv1.OperationType {
 // ValidatingWebhook returns the ValidatingWebhook used for this CRD.
 func (v *Validator) ValidatingWebhook(clientConfig admissionregistrationv1.WebhookClientConfig) []admissionregistrationv1.ValidatingWebhook {
 	return []admissionregistrationv1.ValidatingWebhook{
-		*admission.NewDefaultValidatingWebhook(v, clientConfig, admissionregistrationv1.AllScopes, v.Operations()),
+		*admission.NewDefaultValidatingWebhook(v, clientConfig, admissionregistrationv1.ClusterScope, v.Operations()),
 	}
 }
 
@@ -96,11 +96,6 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 		return &admissionv1.AdmissionResponse{Allowed: true}, nil
 	}
 
-	// Short-circuit: empty credentialRefs means no check needed
-	if len(policy.CredentialRefs) == 0 {
-		return &admissionv1.AdmissionResponse{Allowed: true}, nil
-	}
-
 	// Parse the new object
 	newObj, err := unmarshalUnstructured(request.Object.Raw)
 	if err != nil {
@@ -121,7 +116,7 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 	}
 
 	// Traverse the credential reference chain
-	result := TraverseCredentialChain(newObj, requestGVR, policy, a.store, a.getter, request.Namespace)
+	result := traverseCredentialChain(newObj, requestGVR, policy, a.store, a.getter, request.Namespace)
 
 	if result.skip {
 		// Chain resolved to empty (optional ref not set) - allow
@@ -165,14 +160,18 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 
 // credentialRefChanged compares the resolved credential reference fields between
 // old and new objects to determine if the reference actually changed.
+// If resolution fails (e.g. unsupported prefix), conservatively returns true
+// so the full validation is always run.
 func credentialRefChanged(policy *CredentialPolicy, oldObj, newObj *unstructured.Unstructured, gvr schema.GroupVersionResource) bool {
-	if len(policy.CredentialRefs) == 0 {
-		return false
+	ref := policy.CredentialRef
+	oldResolved, err := resolveCredentialRef(ref, oldObj, gvr)
+	if err != nil {
+		return true
 	}
-
-	ref := policy.CredentialRefs[0]
-	oldResolved := resolveCredentialRef(ref, oldObj, gvr)
-	newResolved := resolveCredentialRef(ref, newObj, gvr)
+	newResolved, err := resolveCredentialRef(ref, newObj, gvr)
+	if err != nil {
+		return true
+	}
 
 	return oldResolved != newResolved
 }

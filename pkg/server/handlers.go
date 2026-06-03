@@ -1,17 +1,19 @@
 package server
 
 import (
+	"context"
+
 	"github.com/rancher/webhook/pkg/admission"
 	"github.com/rancher/webhook/pkg/clients"
 	v3 "github.com/rancher/webhook/pkg/generated/controllers/management.cattle.io/v3"
 	"github.com/rancher/webhook/pkg/resolvers"
-	auditpolicy "github.com/rancher/webhook/pkg/resources/auditlog.cattle.io/v1/auditpolicy"
+	"github.com/rancher/webhook/pkg/resources/auditlog.cattle.io/v1/auditpolicy"
 	"github.com/rancher/webhook/pkg/resources/catalog.cattle.io/v1/clusterrepo"
 	"github.com/rancher/webhook/pkg/resources/cluster.cattle.io/v3/clusterauthtoken"
 	"github.com/rancher/webhook/pkg/resources/cluster.x-k8s.io/v1beta2/machinedeployment"
 	nshandler "github.com/rancher/webhook/pkg/resources/core/v1/namespace"
 	"github.com/rancher/webhook/pkg/resources/core/v1/secret"
-	credentialpolicy "github.com/rancher/webhook/pkg/resources/infrastructure.cluster.x-k8s.io/credentialpolicy"
+	"github.com/rancher/webhook/pkg/resources/infrastructure.cluster.x-k8s.io/credentialpolicy"
 	"github.com/rancher/webhook/pkg/resources/management.cattle.io/v3/authconfig"
 	managementCluster "github.com/rancher/webhook/pkg/resources/management.cattle.io/v3/cluster"
 	"github.com/rancher/webhook/pkg/resources/management.cattle.io/v3/clusterproxyconfig"
@@ -37,6 +39,10 @@ import (
 	"github.com/rancher/webhook/pkg/resources/rbac.authorization.k8s.io/v1/rolebinding"
 	"github.com/rancher/webhook/pkg/resources/rke-machine-config.cattle.io/v1/machineconfig"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/tools/cache"
 )
 
 // Validation returns a list of all ValidatingAdmissionHandlers used by the webhook.
@@ -65,25 +71,61 @@ func Validation(clients *clients.Clients) ([]admission.ValidatingAdmissionHandle
 		auditpolicy.NewValidator(),
 	}
 
-	// CAPI credential policy validator - always registered regardless of MCM
-	credPolicyStore := credentialpolicy.NewConfigStore()
-	cm, err := clients.Core.ConfigMap().Cache().Get(credentialpolicy.ConfigMapNamespace, credentialpolicy.ConfigMapName)
-	if err == nil && cm != nil {
-		credPolicyStore.UpdateConfigMap(cm.Data)
-	} else {
-		logrus.Infof("credential-policy: ConfigMap %s/%s not found, will rely on CRD annotations only", credentialpolicy.ConfigMapNamespace, credentialpolicy.ConfigMapName)
-	}
-	credPolicyValidator := credentialpolicy.NewValidator(
-		credPolicyStore,
-		&credentialpolicy.DynamicObjectGetter{Dynamic: clients.Dynamic},
-		clients.K8s.AuthorizationV1().SubjectAccessReviews(),
-	)
-	handlers = append(handlers, credPolicyValidator)
-
 	if clients.MultiClusterManagement {
 		crtbResolver := resolvers.NewCRTBRuleResolver(clients.Management.ClusterRoleTemplateBinding().Cache(), clients.RoleTemplateResolver)
 		prtbResolver := resolvers.NewPRTBRuleResolver(clients.Management.ProjectRoleTemplateBinding().Cache(), clients.RoleTemplateResolver)
 		grbResolvers := resolvers.NewGRBRuleResolvers(clients.Management.GlobalRoleBinding().Cache(), clients.GlobalRoleResolver)
+
+		// CAPI credential policy validator
+		credPolicyStore := credentialpolicy.NewConfigStore()
+		// Seed from all existing per-provider ConfigMaps carrying the credential-policy label.
+		credPolicySelector := labels.Set{credentialpolicy.LabelKey: credentialpolicy.LabelValue}.AsSelector()
+		existingCMs, listErr := clients.Core.ConfigMap().Cache().List("", credPolicySelector)
+		if listErr != nil {
+			logrus.Warnf("credential-policy: failed to list labeled ConfigMaps: %v", listErr)
+		} else {
+			for _, cm := range existingCMs {
+				credentialpolicy.OnConfigMapChange(credPolicyStore, cm)
+			}
+			logrus.Infof("credential-policy: loaded policies from %d ConfigMap(s)", len(existingCMs))
+		}
+		// Watch for future additions, updates, and deletions of any ConfigMap.
+		// OnConfigMapChange filters by label at handler level.
+		clients.Core.ConfigMap().OnChange(context.Background(), "credential-policy-watcher",
+			func(key string, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+				if cm == nil {
+					// ConfigMap was deleted; key is "namespace/name".
+					ns, name, parseErr := cache.SplitMetaNamespaceKey(key)
+					if parseErr != nil {
+						logrus.Errorf("credential-policy: failed to parse ConfigMap key %q: %v", key, parseErr)
+						return nil, nil
+					}
+					credentialpolicy.OnConfigMapDelete(credPolicyStore, ns, name)
+				} else {
+					credentialpolicy.OnConfigMapChange(credPolicyStore, cm)
+				}
+				return nil, nil
+			})
+
+		// Seed from all existing infrastructure.cluster.x-k8s.io CRDs.
+		existingCRDs, crdListErr := clients.CRD.CustomResourceDefinition().Cache().List(labels.Everything())
+		if crdListErr != nil {
+			logrus.Warnf("credential-policy: failed to list CRDs: %v", crdListErr)
+		} else {
+			for _, crd := range existingCRDs {
+				credentialpolicy.OnCRDChange(credPolicyStore, crd)
+			}
+		}
+		// Watch for future CRD additions, updates, and deletions.
+		clients.CRD.CustomResourceDefinition().OnChange(context.Background(), "credential-policy-crd-watcher",
+			func(key string, crd *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
+				if crd == nil {
+					credentialpolicy.OnCRDDelete(credPolicyStore, key)
+				} else {
+					credentialpolicy.OnCRDChange(credPolicyStore, crd)
+				}
+				return nil, nil
+			})
 
 		handlers = append(
 			handlers,
@@ -116,6 +158,7 @@ func Validation(clients *clients.Clients) ([]admission.ValidatingAdmissionHandle
 			),
 			machinedeployment.NewValidator(clients.Provisioning.Cluster().Cache(), clients.Provisioning.Cluster(), clients.Dynamic),
 			proxyendpoint.NewValidator(),
+			credentialpolicy.NewValidator(credPolicyStore, &credentialpolicy.DynamicObjectGetter{Dynamic: clients.Dynamic}, clients.K8s.AuthorizationV1().SubjectAccessReviews()),
 		)
 	} else {
 		handlers = append(handlers, clusterauthtoken.NewValidator())
