@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-func TestResolveField(t *testing.T) {
+func TestResolveValue(t *testing.T) {
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"spec": map[string]interface{}{
@@ -29,32 +29,83 @@ func TestResolveField(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		literal  string
-		field    string
+		value    string
 		expected string
+		wantErr  string
 	}{
-		{name: "literal wins", literal: "hardcoded", field: "", expected: "hardcoded"},
-		{name: "field path nested map", literal: "", field: "spec.identityRef.kind", expected: "AWSClusterStaticIdentity"},
-		{name: "field path string value", literal: "", field: "spec.secretRef", expected: "my-secret"},
-		{name: "field path deep", literal: "", field: "spec.credentialsRef.name", expected: "gcp-creds"},
-		{name: "field path not found", literal: "", field: "spec.nonexistent.field", expected: ""},
-		{name: "both empty", literal: "", field: "", expected: ""},
+		{name: "literal value", value: "Secret", expected: "Secret"},
+		{name: "literal apiVersion", value: "infrastructure.cluster.x-k8s.io/v1beta2", expected: "infrastructure.cluster.x-k8s.io/v1beta2"},
+		{name: "dot-path nested map", value: ".spec.identityRef.kind", expected: "AWSClusterStaticIdentity"},
+		{name: "dot-path identity name", value: ".spec.identityRef.name", expected: "my-identity"},
+		{name: "dot-path string leaf", value: ".spec.secretRef", expected: "my-secret"},
+		{name: "dot-path deep", value: ".spec.credentialsRef.name", expected: "gcp-creds"},
+		{name: "dot-path not found", value: ".spec.nonexistent.field", expected: ""},
+		{name: "empty string", value: "", expected: ""},
+		{name: "jsonpath simple field", value: "$.spec.identityRef.kind", expected: "AWSClusterStaticIdentity"},
+		{name: "jsonpath string leaf", value: "$.spec.secretRef", expected: "my-secret"},
+		{name: "jsonpath deep", value: "$.spec.credentialsRef.name", expected: "gcp-creds"},
+		{name: "jsonpath not found returns empty", value: "$.spec.nonexistent.field", expected: ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveField(tt.literal, tt.field, obj)
+			got, err := resolveValue(tt.value, obj)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
 			assert.Equal(t, tt.expected, got)
 		})
 	}
 }
 
-func TestResolveField_NilObject(t *testing.T) {
-	got := resolveField("literal", "", nil)
-	assert.Equal(t, "literal", got)
+func TestResolveValue_NilObject(t *testing.T) {
+	// Literals work without an object
+	got, err := resolveValue("Secret", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "Secret", got)
 
-	got = resolveField("", "spec.foo", nil)
+	// Dot-path with nil object returns empty
+	got, err = resolveValue(".spec.foo", nil)
+	require.NoError(t, err)
 	assert.Equal(t, "", got)
+
+	// JSONPath with nil object returns empty
+	got, err = resolveValue("$.spec.foo", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "", got)
+
+	// Empty value returns empty
+	got, err = resolveValue("", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "", got)
+}
+
+func TestResolveValue_JSONPath_ArrayIndex(t *testing.T) {
+	// JSONPath can index into arrays — the key capability dot-path lacks
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"spec": map[string]interface{}{
+				"versions": []interface{}{
+					map[string]interface{}{"name": "v1alpha1", "storage": false},
+					map[string]interface{}{"name": "v1beta2", "storage": true},
+				},
+			},
+		},
+	}
+
+	got, err := resolveValue("$.spec.versions[1].name", obj)
+	require.NoError(t, err)
+	assert.Equal(t, "v1beta2", got)
+}
+
+func TestResolveValue_JSONPath_InvalidExpression(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	_, err := resolveValue("$.[[[invalid", obj)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse JSONPath")
 }
 
 // mockObjectGetter implements objectGetter for testing.
@@ -83,12 +134,12 @@ func TestTraverseCredentialChain_DirectSecret(t *testing.T) {
 			},
 		},
 	}
-	policy := &CredentialPolicy{CredentialRefs: []CredentialRef{
-		{Kind: "Secret", NameField: "spec.credentialsRef.name", NamespaceField: "spec.credentialsRef.namespace"},
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: "Secret", Name: ".spec.credentialsRef.name", Namespace: ".spec.credentialsRef.namespace",
 	}}
 	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "gcpclusters"}
 
-	result := TraverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "fleet-default")
+	result := traverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "fleet-default")
 
 	require.NoError(t, result.err)
 	assert.False(t, result.skip)
@@ -108,12 +159,12 @@ func TestTraverseCredentialChain_SecretNamespaceDefaultsToObjectNamespace(t *tes
 			},
 		},
 	}
-	policy := &CredentialPolicy{CredentialRefs: []CredentialRef{
-		{KindField: "spec.identityRef.kind", NameField: "spec.identityRef.name"},
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: ".spec.identityRef.kind", Name: ".spec.identityRef.name",
 	}}
 	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "vsphereclusters"}
 
-	result := TraverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "fleet-default")
+	result := traverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "fleet-default")
 
 	require.NoError(t, result.err)
 	assert.Equal(t, "vsphere-creds", result.secretName)
@@ -151,16 +202,16 @@ func TestTraverseCredentialChain_TwoLevelIdentityToSecret(t *testing.T) {
 	}
 
 	store := NewConfigStore()
-	store.UpdateConfigMap(map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterstaticidentities": `{"credentialRefs":[{"kind":"Secret","nameField":"spec.secretRef","namespace":"capa-system"}]}`,
+	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
+		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterstaticidentities": `{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
 	})
 
-	policy := &CredentialPolicy{CredentialRefs: []CredentialRef{
-		{KindField: "spec.identityRef.kind", NameField: "spec.identityRef.name"},
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: ".spec.identityRef.kind", Name: ".spec.identityRef.name",
 	}}
 	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusters"}
 
-	result := TraverseCredentialChain(obj, gvr, policy, store, getter, "fleet-default")
+	result := traverseCredentialChain(obj, gvr, policy, store, getter, "fleet-default")
 
 	require.NoError(t, result.err)
 	assert.False(t, result.skip)
@@ -180,12 +231,12 @@ func TestTraverseCredentialChain_EmptyNameSkips(t *testing.T) {
 			},
 		},
 	}
-	policy := &CredentialPolicy{CredentialRefs: []CredentialRef{
-		{Kind: "Secret", NameField: "spec.clientSecret.name", NamespaceField: "spec.clientSecret.namespace"},
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: "Secret", Name: ".spec.clientSecret.name", Namespace: ".spec.clientSecret.namespace",
 	}}
 	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "azureclusteridentities"}
 
-	result := TraverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "default")
+	result := traverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "default")
 
 	assert.True(t, result.skip)
 	assert.NoError(t, result.err)
@@ -202,14 +253,14 @@ func TestTraverseCredentialChain_IdentityNotFound(t *testing.T) {
 			},
 		},
 	}
-	policy := &CredentialPolicy{CredentialRefs: []CredentialRef{
-		{KindField: "spec.identityRef.kind", NameField: "spec.identityRef.name"},
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: ".spec.identityRef.kind", Name: ".spec.identityRef.name",
 	}}
 	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusters"}
 
 	getter := &mockObjectGetter{objects: map[string]*unstructured.Unstructured{}}
 
-	result := TraverseCredentialChain(obj, gvr, policy, NewConfigStore(), getter, "fleet-default")
+	result := traverseCredentialChain(obj, gvr, policy, NewConfigStore(), getter, "fleet-default")
 
 	require.Error(t, result.err)
 	assert.Contains(t, result.err.Error(), "not found")
@@ -248,24 +299,41 @@ func TestTraverseCredentialChain_CircularReference(t *testing.T) {
 	}
 
 	store := NewConfigStore()
-	store.UpdateConfigMap(map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterroleidentities": `{"credentialRefs":[{"kindField":"spec.sourceIdentityRef.kind","nameField":"spec.sourceIdentityRef.name"}]}`,
+	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
+		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterroleidentities": `{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
 	})
 
-	policy := &CredentialPolicy{CredentialRefs: []CredentialRef{
-		{KindField: "spec.sourceIdentityRef.kind", NameField: "spec.sourceIdentityRef.name"},
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: ".spec.sourceIdentityRef.kind", Name: ".spec.sourceIdentityRef.name",
 	}}
 	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterroleidentities"}
 
-	result := TraverseCredentialChain(obj, gvr, policy, store, getter, "")
+	result := traverseCredentialChain(obj, gvr, policy, store, getter, "")
 
 	require.Error(t, result.err)
 	assert.Contains(t, result.err.Error(), "circular credential reference")
 }
 
 func TestTraverseCredentialChain_NilPolicy(t *testing.T) {
-	result := TraverseCredentialChain(nil, schema.GroupVersionResource{}, nil, NewConfigStore(), nil, "")
+	result := traverseCredentialChain(nil, schema.GroupVersionResource{}, nil, NewConfigStore(), nil, "")
 	assert.True(t, result.skip)
+}
+
+func TestTraverseCredentialChain_JSONPathError(t *testing.T) {
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"spec": map[string]interface{}{"name": "foo"},
+		},
+	}
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: "Secret", Name: "$.[[[invalid",
+	}}
+	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusters"}
+
+	result := traverseCredentialChain(obj, gvr, policy, NewConfigStore(), nil, "default")
+
+	require.Error(t, result.err)
+	assert.Contains(t, result.err.Error(), "failed to parse JSONPath")
 }
 
 func TestGvrFromGVK(t *testing.T) {

@@ -1,34 +1,80 @@
 package credentialpolicy
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/jsonpath"
 )
 
-// resolveField returns the literal value if non-empty, otherwise extracts
-// the value at the given dot-path from the unstructured object.
-// Returns empty string if the path does not exist or the value is not a string.
-func resolveField(literal, fieldPath string, obj *unstructured.Unstructured) string {
-	if literal != "" {
-		return literal
-	}
-	if fieldPath == "" || obj == nil {
-		return ""
+// resolveValue resolves a single coordinate value against an unstructured object.
+// The value's prefix determines interpretation:
+//
+//   - "." prefix — dot-path into the object (e.g. ".spec.identityRef.kind").
+//     The leading dot is stripped and the remainder split on "." for traversal.
+//   - "$" prefix — JSONPath expression (e.g. "$.spec.containers[0].name").
+//     Reserved for future use; returns an error if encountered.
+//   - no prefix — literal string returned as-is.
+//
+// Returns the resolved string and any error (only possible for "$" prefix today).
+func resolveValue(value string, obj *unstructured.Unstructured) (string, error) {
+	if value == "" {
+		return "", nil
 	}
 
-	parts := strings.Split(fieldPath, ".")
-	val, found, err := unstructured.NestedString(obj.Object, parts...)
-	if err != nil || !found {
-		return ""
+	switch {
+	case strings.HasPrefix(value, "."):
+		if obj == nil {
+			return "", nil
+		}
+		parts := strings.Split(strings.TrimPrefix(value, "."), ".")
+		val, found, err := unstructured.NestedString(obj.Object, parts...)
+		if err != nil || !found {
+			return "", nil
+		}
+		return val, nil
+
+	case strings.HasPrefix(value, "$"):
+		if obj == nil {
+			return "", nil
+		}
+		return evaluateJSONPath(value, obj.Object)
+
+	default:
+		return value, nil
 	}
-	return val
 }
 
-// resolvedRef holds the resolved coordinates of a credential reference.
+// evaluateJSONPath evaluates a JSONPath expression (with "$" prefix, e.g.
+// "$.spec.containers[0].name") against the given data map and returns the
+// result as a string. The expression is wrapped in "{}" as required by the
+// k8s.io/client-go/util/jsonpath library.
+//
+// Missing keys are treated as empty string (not an error), so optional
+// credential references behave consistently with dot-path resolution.
+// A parse error (malformed expression) is returned as a hard error.
+func evaluateJSONPath(expr string, data map[string]interface{}) (string, error) {
+	jp := jsonpath.New("credentialpolicy").AllowMissingKeys(true)
+
+	// Wrap the raw expression in "{}" as expected by the library.
+	// e.g. "$.spec.foo" → "{$.spec.foo}"
+	if err := jp.Parse("{" + expr + "}"); err != nil {
+		return "", fmt.Errorf("failed to parse JSONPath expression %q: %w", expr, err)
+	}
+
+	var buf bytes.Buffer
+	if err := jp.Execute(&buf, data); err != nil {
+		// With AllowMissingKeys(true) this should only trigger on structural errors.
+		return "", fmt.Errorf("failed to evaluate JSONPath expression %q: %w", expr, err)
+	}
+
+	return buf.String(), nil
+}
+
 type resolvedRef struct {
 	apiVersion string
 	kind       string
@@ -38,12 +84,30 @@ type resolvedRef struct {
 
 // resolveCredentialRef resolves a CredentialRef against an unstructured object,
 // using the given GVR as the default apiVersion source.
-func resolveCredentialRef(ref CredentialRef, obj *unstructured.Unstructured, sourceGVR schema.GroupVersionResource) resolvedRef {
+// Returns an error if any field value uses an unsupported format (e.g. "$" prefix).
+func resolveCredentialRef(ref CredentialRef, obj *unstructured.Unstructured, sourceGVR schema.GroupVersionResource) (resolvedRef, error) {
+	apiVersion, err := resolveValue(ref.APIVersion, obj)
+	if err != nil {
+		return resolvedRef{}, fmt.Errorf("apiVersion: %w", err)
+	}
+	kind, err := resolveValue(ref.Kind, obj)
+	if err != nil {
+		return resolvedRef{}, fmt.Errorf("kind: %w", err)
+	}
+	namespace, err := resolveValue(ref.Namespace, obj)
+	if err != nil {
+		return resolvedRef{}, fmt.Errorf("namespace: %w", err)
+	}
+	name, err := resolveValue(ref.Name, obj)
+	if err != nil {
+		return resolvedRef{}, fmt.Errorf("name: %w", err)
+	}
+
 	resolved := resolvedRef{
-		apiVersion: resolveField(ref.APIVersion, ref.APIVersionField, obj),
-		kind:       resolveField(ref.Kind, ref.KindField, obj),
-		namespace:  resolveField(ref.Namespace, ref.NamespaceField, obj),
-		name:       resolveField(ref.Name, ref.NameField, obj),
+		apiVersion: apiVersion,
+		kind:       kind,
+		namespace:  namespace,
+		name:       name,
 	}
 
 	// Default apiVersion to the source resource's group/version
@@ -51,7 +115,7 @@ func resolveCredentialRef(ref CredentialRef, obj *unstructured.Unstructured, sou
 		resolved.apiVersion = sourceGVR.Group + "/" + sourceGVR.Version
 	}
 
-	return resolved
+	return resolved, nil
 }
 
 // visitedKey is used for loop detection during chain traversal.
@@ -109,7 +173,7 @@ func (d *DynamicObjectGetter) Get(gvk schema.GroupVersionKind, namespace, name s
 	return &unstructured.Unstructured{Object: data}, nil
 }
 
-// TraverseCredentialChain follows the credential reference chain starting from
+// traverseCredentialChain follows the credential reference chain starting from
 // the given object and its config, returning the terminal Secret coordinates
 // or an error if traversal fails.
 //
@@ -120,7 +184,7 @@ func (d *DynamicObjectGetter) Get(gvk schema.GroupVersionKind, namespace, name s
 //   - store: config store for looking up intermediate policies
 //   - getter: cached object getter for fetching intermediate identity objects
 //   - objectNamespace: the namespace of the admitted object (from the request)
-func TraverseCredentialChain(
+func traverseCredentialChain(
 	obj *unstructured.Unstructured,
 	sourceGVR schema.GroupVersionResource,
 	policy *CredentialPolicy,
@@ -128,7 +192,7 @@ func TraverseCredentialChain(
 	getter objectGetter,
 	objectNamespace string,
 ) chainResult {
-	if policy == nil || len(policy.CredentialRefs) == 0 {
+	if policy == nil {
 		return chainResult{skip: true}
 	}
 
@@ -139,8 +203,11 @@ func TraverseCredentialChain(
 	currentNamespace := objectNamespace
 
 	for depth := 0; depth < MaxTraversalDepth; depth++ {
-		ref := currentPolicy.CredentialRefs[0]
-		resolved := resolveCredentialRef(ref, currentObj, currentGVR)
+		ref := currentPolicy.CredentialRef
+		resolved, err := resolveCredentialRef(ref, currentObj, currentGVR)
+		if err != nil {
+			return chainResult{err: fmt.Errorf("failed to resolve credential ref: %w", err)}
+		}
 
 		// If name is empty, the reference is optional/unset - skip
 		if resolved.name == "" {
@@ -188,7 +255,7 @@ func TraverseCredentialChain(
 		// Look up the config for the identity object's type
 		identityGVR := gvrFromGVK(gvk)
 		identityPolicy := store.GetPolicy(identityGVR)
-		if identityPolicy == nil || len(identityPolicy.CredentialRefs) == 0 {
+		if identityPolicy == nil {
 			// Identity has no credential chain configured - skip
 			return chainResult{skip: true}
 		}

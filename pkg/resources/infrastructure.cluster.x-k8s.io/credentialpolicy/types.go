@@ -9,13 +9,19 @@ import (
 
 const (
 	// AnnotationKey is the annotation key placed on CRDs to describe credential references.
-	AnnotationKey = "turtles-capi.cattle.io/sensitive-info"
+	AnnotationKey = "turtles-capi.cattle.io/credential-policy"
 
-	// ConfigMapName is the name of the ConfigMap containing credential policy configuration.
-	ConfigMapName = "turtles-capi-credential-policy"
+	// LabelKey is the label key used to identify ConfigMaps that contain credential policies.
+	// Turtles places this label on the per-provider "credential-policies" ConfigMap.
+	LabelKey = "turtles-capi.cattle.io/credential-policy"
 
-	// ConfigMapNamespace is the namespace where the credential policy ConfigMap resides.
-	ConfigMapNamespace = "cattle-turtles-system"
+	// LabelValue is the value of the credential policy label.
+	LabelValue = "true"
+
+	// ConfigMapName is the conventional name of the per-provider credential policy ConfigMap.
+	// Each provider hosts one ConfigMap with this name in its own namespace
+	// (e.g. capa-system/credential-policies, capv-system/credential-policies).
+	ConfigMapName = "credential-policies"
 
 	// MaxTraversalDepth is the safety limit for credential reference chain traversal.
 	MaxTraversalDepth = 10
@@ -24,65 +30,60 @@ const (
 // CredentialPolicy defines how a CAPI resource references sensitive credentials.
 // This schema is used in both the ConfigMap data values and CRD annotations.
 type CredentialPolicy struct {
-	CredentialRefs []CredentialRef `json:"credentialRefs"`
+	CredentialRef CredentialRef `json:"credentialRef"`
 }
 
 // CredentialRef describes a reference to either an identity object or a Secret.
-// For each coordinate (apiVersion, kind, namespace, name), supply either the literal
-// value OR the Field variant pointing to a dot-path in the object - never both.
+//
+// Each coordinate field (APIVersion, Kind, Namespace, Name) supports three formats
+// determined by the value's prefix:
+//
+//   - "."  prefix — dot-path into the admitted object (e.g. ".spec.identityRef.kind").
+//     The leading dot is stripped and the remainder is split on "." for traversal.
+//   - "$"  prefix — JSONPath expression (e.g. "$.spec.containers[0].name").
+//   - no prefix — literal value (e.g. "Secret", "capa-system").
 //
 // If the resolved kind equals "Secret", this is a terminal reference and
 // a SubjectAccessReview for GET will be performed.
 // Otherwise, the referenced object is treated as an intermediate identity
 // and the traversal continues using that object's configuration.
 type CredentialRef struct {
-	// APIVersion is a literal apiVersion value (e.g. "infrastructure.cluster.x-k8s.io/v1beta2").
+	// APIVersion is the apiVersion coordinate.
+	// Use a literal (e.g. "infrastructure.cluster.x-k8s.io/v1beta2") or
+	// a dot-path (e.g. ".spec.identityRef.apiVersion"), or
+	// a JSONPath (e.g. "$.spec.identityRef.apiVersion").
+	// Defaults to the source resource's group/version if empty or unresolved.
 	APIVersion string `json:"apiVersion,omitempty"`
-	// APIVersionField is a dot-path to extract the apiVersion from the object (e.g. "spec.identityRef.apiVersion").
-	APIVersionField string `json:"apiVersionField,omitempty"`
 
-	// Kind is a literal kind value (e.g. "Secret").
+	// Kind is the kind coordinate.
+	// Use a literal (e.g. "Secret") or a dot-path (e.g. ".spec.identityRef.kind"), or
+	// a JSONPath (e.g. "$.spec.identityRef.kind").
 	Kind string `json:"kind,omitempty"`
-	// KindField is a dot-path to extract the kind from the object (e.g. "spec.identityRef.kind").
-	KindField string `json:"kindField,omitempty"`
 
-	// Namespace is a literal namespace value (e.g. "capa-system").
+	// Namespace is the namespace coordinate.
+	// Use a literal (e.g. "capa-system") or a dot-path (e.g. ".spec.identityRef.namespace"), or
+	// a JSONPath (e.g. "$.spec.identityRef.namespace").
+	// If empty after resolution, falls back to the namespace of the current object in the chain.
 	Namespace string `json:"namespace,omitempty"`
-	// NamespaceField is a dot-path to extract the namespace from the object (e.g. "spec.identityRef.namespace").
-	NamespaceField string `json:"namespaceField,omitempty"`
 
-	// Name is a literal name value.
+	// Name is the name coordinate. Required (must resolve to a non-empty value or the
+	// reference is treated as optional/unset and the check is skipped).
+	// Use a literal or a dot-path (e.g. ".spec.identityRef.name"), or
+	// a JSONPath (e.g. "$.spec.identityRef.name").
 	Name string `json:"name,omitempty"`
-	// NameField is a dot-path to extract the name from the object (e.g. "spec.identityRef.name").
-	NameField string `json:"nameField,omitempty"`
 }
 
 // Validate checks that the CredentialPolicy is well-formed.
-// Rules:
-//   - For each coordinate, only the literal or the Field variant may be set, not both.
-//   - Each CredentialRef must have at least a name or nameField.
+// The CredentialRef must have a non-empty Name.
 func (p *CredentialPolicy) Validate() error {
-	for i, ref := range p.CredentialRefs {
-		if ref.APIVersion != "" && ref.APIVersionField != "" {
-			return fmt.Errorf("credentialRefs[%d]: apiVersion and apiVersionField are mutually exclusive", i)
-		}
-		if ref.Kind != "" && ref.KindField != "" {
-			return fmt.Errorf("credentialRefs[%d]: kind and kindField are mutually exclusive", i)
-		}
-		if ref.Namespace != "" && ref.NamespaceField != "" {
-			return fmt.Errorf("credentialRefs[%d]: namespace and namespaceField are mutually exclusive", i)
-		}
-		if ref.Name != "" && ref.NameField != "" {
-			return fmt.Errorf("credentialRefs[%d]: name and nameField are mutually exclusive", i)
-		}
-		if ref.Name == "" && ref.NameField == "" {
-			return fmt.Errorf("credentialRefs[%d]: one of name or nameField is required", i)
-		}
+	if p.CredentialRef.Name == "" {
+		return fmt.Errorf("credentialRef: name is required")
 	}
 	return nil
 }
 
 // ParseCredentialPolicy deserializes and validates a CredentialPolicy from JSON.
+// Returns nil if data is empty (no policy configured).
 func ParseCredentialPolicy(data string) (*CredentialPolicy, error) {
 	if data == "" {
 		return nil, nil

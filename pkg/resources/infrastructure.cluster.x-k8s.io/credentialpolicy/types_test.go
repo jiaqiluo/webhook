@@ -20,38 +20,30 @@ func TestParseCredentialPolicy(t *testing.T) {
 			want:  nil,
 		},
 		{
-			name:  "empty credentialRefs",
-			input: `{"credentialRefs":[]}`,
-			want:  &CredentialPolicy{CredentialRefs: []CredentialRef{}},
-		},
-		{
-			name:  "valid with nameField only",
-			input: `{"credentialRefs":[{"kindField":"spec.identityRef.kind","nameField":"spec.identityRef.name"}]}`,
-			want: &CredentialPolicy{CredentialRefs: []CredentialRef{
-				{KindField: "spec.identityRef.kind", NameField: "spec.identityRef.name"},
+			name:  "dot-path name and kind",
+			input: `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
+			want: &CredentialPolicy{CredentialRef: CredentialRef{
+				Kind: ".spec.identityRef.kind", Name: ".spec.identityRef.name",
 			}},
 		},
 		{
-			name:  "valid with literals",
-			input: `{"credentialRefs":[{"kind":"Secret","nameField":"spec.secretRef","namespace":"capa-system"}]}`,
-			want: &CredentialPolicy{CredentialRefs: []CredentialRef{
-				{Kind: "Secret", NameField: "spec.secretRef", Namespace: "capa-system"},
+			name:  "literal kind and dot-path name with literal namespace",
+			input: `{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
+			want: &CredentialPolicy{CredentialRef: CredentialRef{
+				Kind: "Secret", Name: ".spec.secretRef", Namespace: "capa-system",
 			}},
 		},
 		{
-			name:    "both name and nameField set",
-			input:   `{"credentialRefs":[{"name":"foo","nameField":"spec.name"}]}`,
-			wantErr: "name and nameField are mutually exclusive",
+			name:  "all literals",
+			input: `{"credentialRef":{"kind":"Secret","name":"my-secret","namespace":"my-ns"}}`,
+			want: &CredentialPolicy{CredentialRef: CredentialRef{
+				Kind: "Secret", Name: "my-secret", Namespace: "my-ns",
+			}},
 		},
 		{
-			name:    "neither name nor nameField set",
-			input:   `{"credentialRefs":[{"kind":"Secret"}]}`,
-			wantErr: "one of name or nameField is required",
-		},
-		{
-			name:    "both kind and kindField set",
-			input:   `{"credentialRefs":[{"kind":"Secret","kindField":"spec.kind","nameField":"spec.name"}]}`,
-			wantErr: "kind and kindField are mutually exclusive",
+			name:    "missing name",
+			input:   `{"credentialRef":{"kind":"Secret"}}`,
+			wantErr: "name is required",
 		},
 		{
 			name:    "invalid JSON",

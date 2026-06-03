@@ -8,71 +8,128 @@ import (
 )
 
 // ConfigStore holds the parsed credential policy configuration from both the
-// ConfigMap and CRD annotations. It is safe for concurrent use.
+// per-provider ConfigMaps and CRD annotations. It is safe for concurrent use.
 //
 // Merge order: ConfigMap entry > CRD annotation > nil (no config).
+//
+// Multiple ConfigMaps (one per provider namespace) are tracked independently
+// so that updating or deleting one ConfigMap only affects its own entries.
+// If two ConfigMaps define a policy for the same GVR, the one with the
+// alphabetically earlier "namespace/name" key wins; a warning is logged at
+// write time (not on every read).
 type ConfigStore struct {
-	mu                sync.RWMutex
-	configMapPolicies map[string]*CredentialPolicy // key: "group/version/resource"
-	crdPolicies       map[string]*CredentialPolicy // key: "group/version/resource"
+	mu sync.RWMutex
+	// configMapPolicies: outer key = "namespace/name", inner key = gvrKey
+	configMapPolicies map[string]map[string]*CredentialPolicy
+	// crdPolicies: key = gvrKey
+	crdPolicies map[string]*CredentialPolicy
+	// crdNameToGVR maps the CRD metadata.name (e.g.
+	// "awsclusters.infrastructure.cluster.x-k8s.io") to the gvrKey it
+	// contributed, enabling clean removal when a CRD is deleted.
+	crdNameToGVR map[string]string
 }
 
 // NewConfigStore creates an initialized ConfigStore.
 func NewConfigStore() *ConfigStore {
 	return &ConfigStore{
-		configMapPolicies: make(map[string]*CredentialPolicy),
+		configMapPolicies: make(map[string]map[string]*CredentialPolicy),
 		crdPolicies:       make(map[string]*CredentialPolicy),
+		crdNameToGVR:      make(map[string]string),
 	}
 }
 
-// gvrKey returns the canonical key for a GVR: "group/version/resource".
+// gvrKey returns the canonical lookup key for a GVR: "group/version/resource".
 func gvrKey(gvr schema.GroupVersionResource) string {
 	return gvr.Group + "/" + gvr.Version + "/" + gvr.Resource
 }
 
+// cmKey returns the lookup key for a ConfigMap: "namespace/name".
+func cmKey(namespace, name string) string {
+	return namespace + "/" + name
+}
+
 // GetPolicy returns the effective policy for the given GVR.
-// Returns nil if no configuration exists (meaning no check is needed).
+// Returns nil if no configuration exists (resource is unconfigured — allow through).
 func (s *ConfigStore) GetPolicy(gvr schema.GroupVersionResource) *CredentialPolicy {
 	key := gvrKey(gvr)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if p, ok := s.configMapPolicies[key]; ok {
-		return p
+	// Pick the ConfigMap with the alphabetically earliest "namespace/name" key.
+	var winner *CredentialPolicy
+	var winnerCMKey string
+
+	for cmk, policies := range s.configMapPolicies {
+		if p, ok := policies[key]; ok {
+			if winner == nil || cmk < winnerCMKey {
+				winner = p
+				winnerCMKey = cmk
+			}
+		}
 	}
-	if p, ok := s.crdPolicies[key]; ok {
-		return p
+	if winner != nil {
+		return winner
 	}
-	return nil
+
+	return s.crdPolicies[key]
 }
 
-// UpdateConfigMap replaces all ConfigMap-sourced policies.
-// Entries that fail to parse are logged and skipped.
-func (s *ConfigStore) UpdateConfigMap(data map[string]string) {
+// UpdateFromConfigMap replaces the policy entries contributed by a single
+// ConfigMap. Entries that fail to parse are logged and skipped.
+// A warning is logged at write time if the incoming data introduces a GVR
+// that is already defined by another ConfigMap.
+func (s *ConfigStore) UpdateFromConfigMap(namespace, name string, data map[string]string) {
+	key := cmKey(namespace, name)
 	parsed := make(map[string]*CredentialPolicy, len(data))
-	for key, raw := range data {
+
+	for gvr, raw := range data {
 		policy, err := ParseCredentialPolicy(raw)
 		if err != nil {
-			logrus.Errorf("credential-policy configmap: invalid entry %q: %v", key, err)
+			logrus.Errorf("credential-policy configmap %s: invalid entry %q: %v", key, gvr, err)
 			continue
 		}
 		if policy != nil {
-			parsed[key] = policy
+			parsed[gvr] = policy
 		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.configMapPolicies = parsed
+
+	// Warn about GVR conflicts at write time (not on every read).
+	for gvr := range parsed {
+		for otherKey, otherPolicies := range s.configMapPolicies {
+			if otherKey == key {
+				continue
+			}
+			if _, exists := otherPolicies[gvr]; exists {
+				logrus.Warnf("credential-policy: GVR %q defined in both ConfigMap %q and %q", gvr, key, otherKey)
+			}
+		}
+	}
+
+	s.configMapPolicies[key] = parsed
 }
 
-// UpdateCRDAnnotation updates or removes the policy derived from a single CRD's annotation.
-func (s *ConfigStore) UpdateCRDAnnotation(gvr schema.GroupVersionResource, raw string) {
+// DeleteConfigMap removes all policy entries contributed by the named ConfigMap.
+func (s *ConfigStore) DeleteConfigMap(namespace, name string) {
+	key := cmKey(namespace, name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.configMapPolicies, key)
+}
+
+// UpdateCRDAnnotation updates or removes the policy derived from a CRD's
+// annotation. crdName is the CRD's metadata.name (e.g.
+// "awsclusters.infrastructure.cluster.x-k8s.io") and is stored for later
+// clean removal via DeleteCRDAnnotation.
+func (s *ConfigStore) UpdateCRDAnnotation(crdName string, gvr schema.GroupVersionResource, raw string) {
 	key := gvrKey(gvr)
 
 	if raw == "" {
 		s.mu.Lock()
 		delete(s.crdPolicies, key)
+		delete(s.crdNameToGVR, crdName)
 		s.mu.Unlock()
 		return
 	}
@@ -87,7 +144,21 @@ func (s *ConfigStore) UpdateCRDAnnotation(gvr schema.GroupVersionResource, raw s
 	defer s.mu.Unlock()
 	if policy != nil {
 		s.crdPolicies[key] = policy
+		s.crdNameToGVR[crdName] = key
 	} else {
 		delete(s.crdPolicies, key)
+		delete(s.crdNameToGVR, crdName)
+	}
+}
+
+// DeleteCRDAnnotation removes the policy contributed by the named CRD.
+// crdName is the CRD's metadata.name (e.g.
+// "awsclusters.infrastructure.cluster.x-k8s.io").
+func (s *ConfigStore) DeleteCRDAnnotation(crdName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key, ok := s.crdNameToGVR[crdName]; ok {
+		delete(s.crdPolicies, key)
+		delete(s.crdNameToGVR, crdName)
 	}
 }

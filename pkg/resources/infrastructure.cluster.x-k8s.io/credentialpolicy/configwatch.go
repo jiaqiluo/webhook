@@ -2,84 +2,87 @@ package credentialpolicy
 
 import (
 	"github.com/sirupsen/logrus"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// RefreshConfigMapData updates the ConfigStore with new ConfigMap data.
-// This function is designed to be called from a ConfigMap informer event handler.
-func RefreshConfigMapData(store *ConfigStore, cm *corev1.ConfigMap) {
+// OnConfigMapChange updates the ConfigStore when a ConfigMap is added or
+// updated. Only ConfigMaps named ConfigMapName that carry LabelKey=LabelValue
+// are processed; all others are silently ignored.
+func OnConfigMapChange(store *ConfigStore, cm *corev1.ConfigMap) {
 	if cm == nil {
-		store.UpdateConfigMap(nil)
 		return
 	}
-	logrus.Infof("credential-policy: refreshing config from ConfigMap %s/%s", cm.Namespace, cm.Name)
-	store.UpdateConfigMap(cm.Data)
+	if cm.Name != ConfigMapName || cm.Labels[LabelKey] != LabelValue {
+		return
+	}
+	logrus.Infof("credential-policy: loading policies from ConfigMap %s/%s", cm.Namespace, cm.Name)
+	store.UpdateFromConfigMap(cm.Namespace, cm.Name, cm.Data)
 }
 
-// ProcessCRDAnnotation extracts the credential policy annotation from a CRD
-// object and updates the ConfigStore. The CRD is expected to be an unstructured
-// representation of an apiextensions/v1 CustomResourceDefinition.
-//
-// This function is designed to be called from a CRD informer event handler.
-func ProcessCRDAnnotation(store *ConfigStore, obj *unstructured.Unstructured) {
-	if obj == nil {
+// OnConfigMapDelete removes ConfigStore entries for a deleted ConfigMap.
+// Deletions of ConfigMaps not named ConfigMapName are silently ignored.
+func OnConfigMapDelete(store *ConfigStore, namespace, name string) {
+	if name != ConfigMapName {
+		return
+	}
+	logrus.Infof("credential-policy: removing policies from deleted ConfigMap %s/%s", namespace, name)
+	store.DeleteConfigMap(namespace, name)
+}
+
+// OnCRDChange updates the ConfigStore when a CustomResourceDefinition is added
+// or updated. Only CRDs in the "infrastructure.cluster.x-k8s.io" group are
+// processed; the AnnotationKey annotation value (empty string if absent) is
+// used to set or clear the policy for this resource type.
+func OnCRDChange(store *ConfigStore, crd *apiextensionsv1.CustomResourceDefinition) {
+	if crd == nil {
+		return
+	}
+	if crd.Spec.Group != "infrastructure.cluster.x-k8s.io" {
 		return
 	}
 
-	annotations := obj.GetAnnotations()
-	raw := annotations[AnnotationKey]
-
-	// Extract GVR from the CRD spec
-	group, _, _ := unstructured.NestedString(obj.Object, "spec", "group")
-	// Only process CRDs in the infrastructure.cluster.x-k8s.io group
-	if group != "infrastructure.cluster.x-k8s.io" {
-		return
-	}
-
-	version := extractServingVersion(obj)
+	version := servingVersion(crd)
 	if version == "" {
 		return
 	}
-
-	resourcePlural, _, _ := unstructured.NestedString(obj.Object, "spec", "names", "plural")
-	if resourcePlural == "" {
+	resource := crd.Spec.Names.Plural
+	if resource == "" {
 		return
 	}
 
 	gvr := schema.GroupVersionResource{
-		Group:    group,
+		Group:    crd.Spec.Group,
 		Version:  version,
-		Resource: resourcePlural,
+		Resource: resource,
 	}
 
-	store.UpdateCRDAnnotation(gvr, raw)
+	raw := crd.Annotations[AnnotationKey]
+	logrus.Debugf("credential-policy: processing CRD annotation for %s/%s/%s (present=%v)",
+		gvr.Group, gvr.Version, gvr.Resource, raw != "")
+	store.UpdateCRDAnnotation(crd.Name, gvr, raw)
 }
 
-// extractServingVersion returns the served+storage version from a CRD, or the
-// first served version if no storage version is found.
-func extractServingVersion(obj *unstructured.Unstructured) string {
-	versions, found, err := unstructured.NestedSlice(obj.Object, "spec", "versions")
-	if err != nil || !found || len(versions) == 0 {
-		return ""
-	}
+// OnCRDDelete removes ConfigStore entries contributed by a deleted CRD.
+// crdName is the value of the CRD's metadata.name field, which the wrangler
+// OnChange handler passes as the key when the object is nil.
+func OnCRDDelete(store *ConfigStore, crdName string) {
+	logrus.Infof("credential-policy: removing CRD annotation for deleted CRD %s", crdName)
+	store.DeleteCRDAnnotation(crdName)
+}
 
+// servingVersion returns the name of the served+storage version of the CRD.
+// If no single version is both served and storage (unusual), it returns the
+// first served version; empty string if none are served.
+func servingVersion(crd *apiextensionsv1.CustomResourceDefinition) string {
 	var firstServed string
-	for _, v := range versions {
-		vMap, ok := v.(map[string]interface{})
-		if !ok {
-			continue
+	for _, v := range crd.Spec.Versions {
+		if v.Served && v.Storage {
+			return v.Name
 		}
-		name, _, _ := unstructured.NestedString(vMap, "name")
-		served, _, _ := unstructured.NestedBool(vMap, "served")
-		storage, _, _ := unstructured.NestedBool(vMap, "storage")
-
-		if served && storage {
-			return name
-		}
-		if served && firstServed == "" {
-			firstServed = name
+		if v.Served && firstServed == "" {
+			firstServed = v.Name
 		}
 	}
 	return firstServed
