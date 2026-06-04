@@ -22,7 +22,7 @@ import (
 // newTestAdmitter creates an admitter with the given store, getter, and a fake SAR client.
 func newTestAdmitter(store *ConfigStore, getter objectGetter, sarAllowed bool) *admitter {
 	fakeClient := fakeclientset.NewSimpleClientset()
-	fakeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	fakeClient.PrependReactor("create", "subjectaccessreviews", func(_ k8stesting.Action) (bool, runtime.Object, error) {
 		return true, &authorizationv1api.SubjectAccessReview{
 			Status: authorizationv1api.SubjectAccessReviewStatus{
 				Allowed: sarAllowed,
@@ -274,8 +274,8 @@ func TestAdmitter_ThreeLevelChain_AWS(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
-			"infrastructure.cluster.x-k8s.io/AWSClusterStaticIdentity//my-static-id": staticIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterStaticIdentity//my-static-id": staticIdentity,
 		},
 	}
 
@@ -339,8 +339,8 @@ func TestAdmitter_ThreeLevelChain_AWS_Denied(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
-			"infrastructure.cluster.x-k8s.io/AWSClusterStaticIdentity//my-static-id": staticIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterStaticIdentity//my-static-id": staticIdentity,
 		},
 	}
 
@@ -367,7 +367,7 @@ func TestAdmitter_ThreeLevelChain_AWS_Denied(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, resp.Allowed)
 	assert.Contains(t, resp.Result.Message, "does not have permission to get secret")
-	assert.Contains(t, resp.Result.Message, "capa-system/aws-credentials")
+	assert.Contains(t, resp.Result.Message, "cattle-global-data/aws-credentials")
 }
 
 func TestAdmitter_ControllerIdentity_Skip(t *testing.T) {
@@ -391,7 +391,7 @@ func TestAdmitter_ControllerIdentity_Skip(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterControllerIdentity//default": controllerIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterControllerIdentity//default": controllerIdentity,
 		},
 	}
 

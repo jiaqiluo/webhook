@@ -62,7 +62,7 @@ func (v *Validator) Operations() []admissionregistrationv1.OperationType {
 // ValidatingWebhook returns the ValidatingWebhook used for this CRD.
 func (v *Validator) ValidatingWebhook(clientConfig admissionregistrationv1.WebhookClientConfig) []admissionregistrationv1.ValidatingWebhook {
 	return []admissionregistrationv1.ValidatingWebhook{
-		*admission.NewDefaultValidatingWebhook(v, clientConfig, admissionregistrationv1.ClusterScope, v.Operations()),
+		*admission.NewDefaultValidatingWebhook(v, clientConfig, admissionregistrationv1.AllScopes, v.Operations()),
 	}
 }
 
@@ -93,6 +93,7 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 	policy := a.store.GetPolicy(requestGVR)
 	if policy == nil {
 		// No configuration for this resource type - allow
+		logrus.Tracef("credentialPolicyValidator: no policy for %s, allowing by default", requestGVR.String())
 		return &admissionv1.AdmissionResponse{Allowed: true}, nil
 	}
 
@@ -111,12 +112,16 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 
 		if !credentialRefChanged(policy, oldObj, newObj, requestGVR) {
 			// Credential reference hasn't changed - allow without SAR
+			logrus.Tracef("credentialPolicyValidator: credential reference unchanged for %s %s/%s, allowing without access review", requestGVR.String(), request.Namespace, request.Name)
 			return &admissionv1.AdmissionResponse{Allowed: true}, nil
 		}
 	}
 
 	// Traverse the credential reference chain
 	result := traverseCredentialChain(newObj, requestGVR, policy, a.store, a.getter, request.Namespace)
+
+	logrus.Tracef("credentialPolicyValidator: traversal result for %s %s/%s: skip=%v, secret=%s/%s, err=%v",
+		requestGVR.String(), request.Namespace, request.Name, result.skip, result.secretNamespace, result.secretName, result.err)
 
 	if result.skip {
 		// Chain resolved to empty (optional ref not set) - allow
@@ -147,10 +152,11 @@ func (a *admitter) Admit(request *admission.Request) (*admissionv1.AdmissionResp
 		return &admissionv1.AdmissionResponse{
 			Allowed: false,
 			Result: &metav1.Status{
-				Status:  "Failure",
-				Message: fmt.Sprintf("user %q does not have permission to get secret %s/%s referenced by this resource's credential chain", request.UserInfo.Username, result.secretNamespace, result.secretName),
-				Reason:  metav1.StatusReasonForbidden,
-				Code:    http.StatusForbidden,
+				Status: "Failure",
+				Message: fmt.Sprintf("user %q does not have permission to get secret %s/%s referenced by this resource's credential chain",
+					request.UserInfo.Username, result.secretNamespace, result.secretName),
+				Reason: metav1.StatusReasonForbidden,
+				Code:   http.StatusForbidden,
 			},
 		}, nil
 	}

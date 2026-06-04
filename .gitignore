@@ -9,3 +9,4 @@
 /webhook
 *~
 .opencode
+kubeconfig.yaml

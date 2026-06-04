@@ -1,9 +1,13 @@
 package credentialpolicy
 
 import (
+	"context"
 	"sync"
 
+	"github.com/rancher/webhook/pkg/clients"
 	"github.com/sirupsen/logrus"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -36,6 +40,36 @@ func NewConfigStore() *ConfigStore {
 		crdPolicies:       make(map[string]*CredentialPolicy),
 		crdNameToGVR:      make(map[string]string),
 	}
+}
+
+// SetupCredentialPolicyStore initializes a ConfigStore with existing CRD annotations,
+// and sets up watchers to keep it updated on future CRD changes.
+// It returns the initialized store.
+func SetupCredentialPolicyStore(clients *clients.Clients) *ConfigStore {
+	// CAPI credential policy validator — seeded from CRD annotations.
+	store := NewConfigStore()
+
+	// Seed from all existing infrastructure.cluster.x-k8s.io CRDs.
+	existingCRDs, crdListErr := clients.CRD.CustomResourceDefinition().Cache().List(labels.Everything())
+	if crdListErr != nil {
+		logrus.Warnf("credential-policy: failed to list CRDs: %v", crdListErr)
+	} else {
+		for _, crd := range existingCRDs {
+			OnCRDChange(store, crd)
+		}
+	}
+
+	// Watch for future CRD additions, updates, and deletions.
+	clients.CRD.CustomResourceDefinition().OnChange(context.Background(), "credential-policy-crd-watcher",
+		func(key string, crd *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
+			if crd == nil || crd.DeletionTimestamp != nil {
+				OnCRDDelete(store, key)
+			} else {
+				OnCRDChange(store, crd)
+			}
+			return nil, nil
+		})
+	return store
 }
 
 // gvrKey returns the canonical lookup key for a GVR: "group/version/resource".

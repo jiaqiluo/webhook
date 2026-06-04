@@ -84,7 +84,7 @@ func TestConfigStore_DeleteCRDAnnotation(t *testing.T) {
 	assert.Nil(t, store.GetPolicy(awsClusterGVR))
 }
 
-func TestConfigStore_DeleteCRDAnnotation_UnknownName_NoOp(t *testing.T) {
+func TestConfigStore_DeleteCRDAnnotation_UnknownName_NoOp(_ *testing.T) {
 	store := NewConfigStore()
 	// Must not panic
 	store.DeleteCRDAnnotation("nonexistent.crd")

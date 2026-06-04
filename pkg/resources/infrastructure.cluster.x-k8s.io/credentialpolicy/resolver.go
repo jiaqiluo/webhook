@@ -11,13 +11,17 @@ import (
 	"k8s.io/client-go/util/jsonpath"
 )
 
+const (
+	rancherCredentialsNamespace = "cattle-global-data"
+	providerNamespaceCAPA       = "capa-system"
+)
+
 // resolveValue resolves a single coordinate value against an unstructured object.
 // The value's prefix determines interpretation:
 //
 //   - "." prefix — dot-path into the object (e.g. ".spec.identityRef.kind").
 //     The leading dot is stripped and the remainder split on "." for traversal.
 //   - "$" prefix — JSONPath expression (e.g. "$.spec.containers[0].name").
-//     Reserved for future use; returns an error if encountered.
 //   - no prefix — literal string returned as-is.
 //
 // Returns the resolved string and any error (only possible for "$" prefix today).
@@ -84,7 +88,8 @@ type resolvedRef struct {
 
 // resolveCredentialRef resolves a CredentialRef against an unstructured object,
 // using the given GVR as the default apiVersion source.
-// Returns an error if any field value uses an unsupported format (e.g. "$" prefix).
+// Returns an error if any coordinate fails to resolve due to a malformed JSONPath
+// expression or other resolution error.
 func resolveCredentialRef(ref CredentialRef, obj *unstructured.Unstructured, sourceGVR schema.GroupVersionResource) (resolvedRef, error) {
 	apiVersion, err := resolveValue(ref.APIVersion, obj)
 	if err != nil {
@@ -113,6 +118,10 @@ func resolveCredentialRef(ref CredentialRef, obj *unstructured.Unstructured, sou
 	// Default apiVersion to the source resource's group/version
 	if resolved.apiVersion == "" {
 		resolved.apiVersion = sourceGVR.Group + "/" + sourceGVR.Version
+	}
+
+	if resolved.kind == "Secret" {
+		resolved.apiVersion = "v1"
 	}
 
 	return resolved, nil
@@ -184,14 +193,8 @@ func (d *DynamicObjectGetter) Get(gvk schema.GroupVersionKind, namespace, name s
 //   - store: config store for looking up intermediate policies
 //   - getter: cached object getter for fetching intermediate identity objects
 //   - objectNamespace: the namespace of the admitted object (from the request)
-func traverseCredentialChain(
-	obj *unstructured.Unstructured,
-	sourceGVR schema.GroupVersionResource,
-	policy *CredentialPolicy,
-	store *ConfigStore,
-	getter objectGetter,
-	objectNamespace string,
-) chainResult {
+func traverseCredentialChain(obj *unstructured.Unstructured, sourceGVR schema.GroupVersionResource,
+	policy *CredentialPolicy, store *ConfigStore, getter objectGetter, objectNamespace string) chainResult {
 	if policy == nil {
 		return chainResult{skip: true}
 	}
@@ -209,19 +212,22 @@ func traverseCredentialChain(
 			return chainResult{err: fmt.Errorf("failed to resolve credential ref: %w", err)}
 		}
 
-		// If name is empty, the reference is optional/unset - skip
 		if resolved.name == "" {
 			return chainResult{skip: true}
 		}
 
 		// Terminal: resolved kind is Secret
-		if resolved.kind == "Secret" {
+		if strings.ToLower(resolved.kind) == "secret" {
 			secretNs := resolved.namespace
 			if secretNs == "" {
 				secretNs = currentNamespace
 			}
+			if currentGVR.Resource == "awsclusterstaticidentities" && secretNs == providerNamespaceCAPA {
+				// the secret is a mirror of rancher cloud credential managed by Turtles
+				secretNs = rancherCredentialsNamespace
+			}
 			if secretNs == "" {
-				return chainResult{err: fmt.Errorf("cannot determine namespace for Secret %q: no namespace in config and resource is cluster-scoped", resolved.name)}
+				return chainResult{err: fmt.Errorf("cannot determine namespace for Secret %q: no namespace in policy", resolved.name)}
 			}
 			return chainResult{secretName: resolved.name, secretNamespace: secretNs}
 		}
@@ -235,7 +241,8 @@ func traverseCredentialChain(
 			name:       resolved.name,
 		}
 		if visited[key] {
-			return chainResult{err: fmt.Errorf("circular credential reference detected at %s/%s %s/%s", resolved.apiVersion, resolved.kind, resolved.namespace, resolved.name)}
+			return chainResult{err: fmt.Errorf("circular credential reference detected at %s/%s %s/%s",
+				resolved.apiVersion, resolved.kind, resolved.namespace, resolved.name)}
 		}
 		visited[key] = true
 
@@ -249,7 +256,7 @@ func traverseCredentialChain(
 		// Fetch the intermediate object from cache
 		identityObj, err := getter.Get(gvk, resolved.namespace, resolved.name)
 		if err != nil {
-			return chainResult{err: fmt.Errorf("referenced identity object %s %s/%s not found: %w", gvk.String(), resolved.namespace, resolved.name, err)}
+			return chainResult{err: fmt.Errorf("failed to get referenced identity object: %w", err)}
 		}
 
 		// Look up the config for the identity object's type
