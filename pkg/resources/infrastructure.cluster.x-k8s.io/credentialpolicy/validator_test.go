@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stesting "k8s.io/client-go/testing"
 
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
@@ -83,9 +84,11 @@ func TestAdmitter_NoConfig_Allowed(t *testing.T) {
 
 func TestAdmitter_Create_Allowed(t *testing.T) {
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("gcp-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta1/gcpclusters": `{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"gcpclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "gcpclusters"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
+	)
 
 	a := newTestAdmitter(store, nil, true) // SAR returns allowed
 
@@ -111,9 +114,11 @@ func TestAdmitter_Create_Allowed(t *testing.T) {
 
 func TestAdmitter_Create_Denied(t *testing.T) {
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("gcp-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta1/gcpclusters": `{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"gcpclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "gcpclusters"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
+	)
 
 	a := newTestAdmitter(store, nil, false) // SAR returns denied
 
@@ -141,9 +146,11 @@ func TestAdmitter_Create_Denied(t *testing.T) {
 
 func TestAdmitter_Update_SkipsWhenRefUnchanged(t *testing.T) {
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("gcp-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta1/gcpclusters": `{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"gcpclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "gcpclusters"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
+	)
 
 	// SAR returns denied - but it should never be called because ref is unchanged
 	a := newTestAdmitter(store, nil, false)
@@ -172,9 +179,11 @@ func TestAdmitter_Update_SkipsWhenRefUnchanged(t *testing.T) {
 
 func TestAdmitter_Update_DeniedWhenRefChanged(t *testing.T) {
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("gcp-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta1/gcpclusters": `{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"gcpclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "gcpclusters"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.credentialsRef.name","namespace":".spec.credentialsRef.namespace"}}`,
+	)
 
 	a := newTestAdmitter(store, nil, false) // SAR returns denied
 
@@ -212,9 +221,11 @@ func TestAdmitter_Update_DeniedWhenRefChanged(t *testing.T) {
 func TestAdmitter_OptionalRefEmpty_Allowed(t *testing.T) {
 	// AzureClusterIdentity with WorkloadIdentity: clientSecret.name is empty -> skip
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("capz-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta1/azureclusteridentities": `{"credentialRef":{"kind":"Secret","name":".spec.clientSecret.name","namespace":".spec.clientSecret.namespace"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"azureclusteridentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Resource: "azureclusteridentities"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.clientSecret.name","namespace":".spec.clientSecret.namespace"}}`,
+	)
 
 	a := newTestAdmitter(store, nil, false) // SAR denied, but won't be called
 
@@ -241,11 +252,21 @@ func TestAdmitter_OptionalRefEmpty_Allowed(t *testing.T) {
 func TestAdmitter_ThreeLevelChain_AWS(t *testing.T) {
 	// AWSCluster -> AWSClusterRoleIdentity -> AWSClusterStaticIdentity -> Secret
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters":                `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterroleidentities":   `{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterstaticidentities": `{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"awsclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusters"},
+		`{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
+	)
+	store.UpdateCRDAnnotation(
+		"awsclusterroleidentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterroleidentities"},
+		`{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
+	)
+	store.UpdateCRDAnnotation(
+		"awsclusterstaticidentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterstaticidentities"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
+	)
 
 	roleIdentity := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -306,11 +327,21 @@ func TestAdmitter_ThreeLevelChain_AWS(t *testing.T) {
 func TestAdmitter_ThreeLevelChain_AWS_Denied(t *testing.T) {
 	// Same as above but SAR denied
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters":                `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterroleidentities":   `{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterstaticidentities": `{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"awsclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusters"},
+		`{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
+	)
+	store.UpdateCRDAnnotation(
+		"awsclusterroleidentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterroleidentities"},
+		`{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
+	)
+	store.UpdateCRDAnnotation(
+		"awsclusterstaticidentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterstaticidentities"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
+	)
 
 	roleIdentity := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -375,10 +406,11 @@ func TestAdmitter_ControllerIdentity_Skip(t *testing.T) {
 	// AWSClusterControllerIdentity has NO policy entry (it owns no credential chain),
 	// so traversal returns skip -> allowed without SAR.
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
-		// Only the cluster is configured; controller identity has no entry.
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters": `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"awsclusters.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusters"},
+		`{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
+	)
 
 	controllerIdentity := &unstructured.Unstructured{
 		Object: map[string]interface{}{

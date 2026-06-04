@@ -3,33 +3,8 @@ package credentialpolicy
 import (
 	"github.com/sirupsen/logrus"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
-
-// OnConfigMapChange updates the ConfigStore when a ConfigMap is added or
-// updated. Only ConfigMaps named ConfigMapName that carry LabelKey=LabelValue
-// are processed; all others are silently ignored.
-func OnConfigMapChange(store *ConfigStore, cm *corev1.ConfigMap) {
-	if cm == nil {
-		return
-	}
-	if cm.Name != ConfigMapName || cm.Labels[LabelKey] != LabelValue {
-		return
-	}
-	logrus.Infof("credential-policy: loading policies from ConfigMap %s/%s", cm.Namespace, cm.Name)
-	store.UpdateFromConfigMap(cm.Namespace, cm.Name, cm.Data)
-}
-
-// OnConfigMapDelete removes ConfigStore entries for a deleted ConfigMap.
-// Deletions of ConfigMaps not named ConfigMapName are silently ignored.
-func OnConfigMapDelete(store *ConfigStore, namespace, name string) {
-	if name != ConfigMapName {
-		return
-	}
-	logrus.Infof("credential-policy: removing policies from deleted ConfigMap %s/%s", namespace, name)
-	store.DeleteConfigMap(namespace, name)
-}
 
 // OnCRDChange updates the ConfigStore when a CustomResourceDefinition is added
 // or updated. Only CRDs in the "infrastructure.cluster.x-k8s.io" group are

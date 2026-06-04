@@ -39,10 +39,8 @@ import (
 	"github.com/rancher/webhook/pkg/resources/rbac.authorization.k8s.io/v1/rolebinding"
 	"github.com/rancher/webhook/pkg/resources/rke-machine-config.cattle.io/v1/machineconfig"
 	"github.com/sirupsen/logrus"
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/cache"
 )
 
 // Validation returns a list of all ValidatingAdmissionHandlers used by the webhook.
@@ -76,36 +74,8 @@ func Validation(clients *clients.Clients) ([]admission.ValidatingAdmissionHandle
 		prtbResolver := resolvers.NewPRTBRuleResolver(clients.Management.ProjectRoleTemplateBinding().Cache(), clients.RoleTemplateResolver)
 		grbResolvers := resolvers.NewGRBRuleResolvers(clients.Management.GlobalRoleBinding().Cache(), clients.GlobalRoleResolver)
 
-		// CAPI credential policy validator
+		// CAPI credential policy validator — seeded from CRD annotations.
 		credPolicyStore := credentialpolicy.NewConfigStore()
-		// Seed from all existing per-provider ConfigMaps carrying the credential-policy label.
-		credPolicySelector := labels.Set{credentialpolicy.LabelKey: credentialpolicy.LabelValue}.AsSelector()
-		existingCMs, listErr := clients.Core.ConfigMap().Cache().List("", credPolicySelector)
-		if listErr != nil {
-			logrus.Warnf("credential-policy: failed to list labeled ConfigMaps: %v", listErr)
-		} else {
-			for _, cm := range existingCMs {
-				credentialpolicy.OnConfigMapChange(credPolicyStore, cm)
-			}
-			logrus.Infof("credential-policy: loaded policies from %d ConfigMap(s)", len(existingCMs))
-		}
-		// Watch for future additions, updates, and deletions of any ConfigMap.
-		// OnConfigMapChange filters by label at handler level.
-		clients.Core.ConfigMap().OnChange(context.Background(), "credential-policy-watcher",
-			func(key string, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
-				if cm == nil {
-					// ConfigMap was deleted; key is "namespace/name".
-					ns, name, parseErr := cache.SplitMetaNamespaceKey(key)
-					if parseErr != nil {
-						logrus.Errorf("credential-policy: failed to parse ConfigMap key %q: %v", key, parseErr)
-						return nil, nil
-					}
-					credentialpolicy.OnConfigMapDelete(credPolicyStore, ns, name)
-				} else {
-					credentialpolicy.OnConfigMapChange(credPolicyStore, cm)
-				}
-				return nil, nil
-			})
 
 		// Seed from all existing infrastructure.cluster.x-k8s.io CRDs.
 		existingCRDs, crdListErr := clients.CRD.CustomResourceDefinition().Cache().List(labels.Everything())

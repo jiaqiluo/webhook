@@ -202,9 +202,11 @@ func TestTraverseCredentialChain_TwoLevelIdentityToSecret(t *testing.T) {
 	}
 
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterstaticidentities": `{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"awsclusterstaticidentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterstaticidentities"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capa-system"}}`,
+	)
 
 	policy := &CredentialPolicy{CredentialRef: CredentialRef{
 		Kind: ".spec.identityRef.kind", Name: ".spec.identityRef.name",
@@ -299,9 +301,11 @@ func TestTraverseCredentialChain_CircularReference(t *testing.T) {
 	}
 
 	store := NewConfigStore()
-	store.UpdateFromConfigMap("capa-system", "credential-policies", map[string]string{
-		"infrastructure.cluster.x-k8s.io/v1beta2/awsclusterroleidentities": `{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
-	})
+	store.UpdateCRDAnnotation(
+		"awsclusterroleidentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "awsclusterroleidentities"},
+		`{"credentialRef":{"kind":".spec.sourceIdentityRef.kind","name":".spec.sourceIdentityRef.name"}}`,
+	)
 
 	policy := &CredentialPolicy{CredentialRef: CredentialRef{
 		Kind: ".spec.sourceIdentityRef.kind", Name: ".spec.sourceIdentityRef.name",

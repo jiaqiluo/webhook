@@ -6,7 +6,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -27,18 +26,6 @@ func makeCRD(name, group, plural, version string, annotations map[string]string)
 				{Name: version, Served: true, Storage: true},
 			},
 		},
-	}
-}
-
-// makeConfigMap builds a minimal ConfigMap for use in tests.
-func makeConfigMap(name, namespace string, labels map[string]string, data map[string]string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels,
-		},
-		Data: data,
 	}
 }
 
@@ -215,93 +202,4 @@ func TestServingVersion_NoneServed(t *testing.T) {
 		},
 	}
 	assert.Equal(t, "", servingVersion(crd))
-}
-
-// --- OnConfigMapChange name + label guards ---
-
-func TestOnConfigMapChange_ValidCM_Loaded(t *testing.T) {
-	store := NewConfigStore()
-	cm := makeConfigMap(
-		ConfigMapName, "capa-system",
-		map[string]string{LabelKey: LabelValue},
-		map[string]string{
-			"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters": `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		},
-	)
-
-	OnConfigMapChange(store, cm)
-
-	assert.NotNil(t, store.GetPolicy(capaAWSClusterGVR))
-}
-
-func TestOnConfigMapChange_WrongName_Ignored(t *testing.T) {
-	store := NewConfigStore()
-	cm := makeConfigMap(
-		"wrong-name", "capa-system",
-		map[string]string{LabelKey: LabelValue},
-		map[string]string{
-			"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters": `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		},
-	)
-
-	OnConfigMapChange(store, cm)
-
-	assert.Nil(t, store.GetPolicy(capaAWSClusterGVR))
-}
-
-func TestOnConfigMapChange_MissingLabel_Ignored(t *testing.T) {
-	store := NewConfigStore()
-	cm := makeConfigMap(
-		ConfigMapName, "capa-system",
-		nil, // no labels
-		map[string]string{
-			"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters": `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		},
-	)
-
-	OnConfigMapChange(store, cm)
-
-	assert.Nil(t, store.GetPolicy(capaAWSClusterGVR))
-}
-
-func TestOnConfigMapChange_Nil_NoOp(t *testing.T) {
-	store := NewConfigStore()
-	OnConfigMapChange(store, nil) // must not panic
-}
-
-// --- OnConfigMapDelete name guard ---
-
-func TestOnConfigMapDelete_ValidName_Removed(t *testing.T) {
-	store := NewConfigStore()
-	cm := makeConfigMap(
-		ConfigMapName, "capa-system",
-		map[string]string{LabelKey: LabelValue},
-		map[string]string{
-			"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters": `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		},
-	)
-	OnConfigMapChange(store, cm)
-	require.NotNil(t, store.GetPolicy(capaAWSClusterGVR))
-
-	OnConfigMapDelete(store, "capa-system", ConfigMapName)
-
-	assert.Nil(t, store.GetPolicy(capaAWSClusterGVR))
-}
-
-func TestOnConfigMapDelete_WrongName_Ignored(t *testing.T) {
-	store := NewConfigStore()
-	cm := makeConfigMap(
-		ConfigMapName, "capa-system",
-		map[string]string{LabelKey: LabelValue},
-		map[string]string{
-			"infrastructure.cluster.x-k8s.io/v1beta2/awsclusters": `{"credentialRef":{"kind":".spec.identityRef.kind","name":".spec.identityRef.name"}}`,
-		},
-	)
-	OnConfigMapChange(store, cm)
-	require.NotNil(t, store.GetPolicy(capaAWSClusterGVR))
-
-	// Delete with wrong name — entry must survive
-	OnConfigMapDelete(store, "capa-system", "wrong-name")
-
-	assert.NotNil(t, store.GetPolicy(capaAWSClusterGVR))
 }

@@ -11,18 +11,6 @@ const (
 	// AnnotationKey is the annotation key placed on CRDs to describe credential references.
 	AnnotationKey = "turtles-capi.cattle.io/credential-policy"
 
-	// LabelKey is the label key used to identify ConfigMaps that contain credential policies.
-	// Turtles places this label on the per-provider "credential-policies" ConfigMap.
-	LabelKey = "turtles-capi.cattle.io/credential-policy"
-
-	// LabelValue is the value of the credential policy label.
-	LabelValue = "true"
-
-	// ConfigMapName is the conventional name of the per-provider credential policy ConfigMap.
-	// Each provider hosts one ConfigMap with this name in its own namespace
-	// (e.g. capa-system/credential-policies, capv-system/credential-policies).
-	ConfigMapName = "credential-policies"
-
 	// MaxTraversalDepth is the safety limit for credential reference chain traversal.
 	MaxTraversalDepth = 10
 )

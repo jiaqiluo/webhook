@@ -7,20 +7,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// ConfigStore holds the parsed credential policy configuration from both the
-// per-provider ConfigMaps and CRD annotations. It is safe for concurrent use.
-//
-// Merge order: ConfigMap entry > CRD annotation > nil (no config).
-//
-// Multiple ConfigMaps (one per provider namespace) are tracked independently
-// so that updating or deleting one ConfigMap only affects its own entries.
-// If two ConfigMaps define a policy for the same GVR, the one with the
-// alphabetically earlier "namespace/name" key wins; a warning is logged at
-// write time (not on every read).
+// ConfigStore holds the parsed credential policy configuration derived from
+// CRD annotations. It is safe for concurrent use.
 type ConfigStore struct {
 	mu sync.RWMutex
-	// configMapPolicies: outer key = "namespace/name", inner key = gvrKey
-	configMapPolicies map[string]map[string]*CredentialPolicy
 	// crdPolicies: key = gvrKey
 	crdPolicies map[string]*CredentialPolicy
 	// crdNameToGVR maps the CRD metadata.name (e.g.
@@ -32,9 +22,8 @@ type ConfigStore struct {
 // NewConfigStore creates an initialized ConfigStore.
 func NewConfigStore() *ConfigStore {
 	return &ConfigStore{
-		configMapPolicies: make(map[string]map[string]*CredentialPolicy),
-		crdPolicies:       make(map[string]*CredentialPolicy),
-		crdNameToGVR:      make(map[string]string),
+		crdPolicies:  make(map[string]*CredentialPolicy),
+		crdNameToGVR: make(map[string]string),
 	}
 }
 
@@ -43,80 +32,13 @@ func gvrKey(gvr schema.GroupVersionResource) string {
 	return gvr.Group + "/" + gvr.Version + "/" + gvr.Resource
 }
 
-// cmKey returns the lookup key for a ConfigMap: "namespace/name".
-func cmKey(namespace, name string) string {
-	return namespace + "/" + name
-}
-
 // GetPolicy returns the effective policy for the given GVR.
 // Returns nil if no configuration exists (resource is unconfigured — allow through).
 func (s *ConfigStore) GetPolicy(gvr schema.GroupVersionResource) *CredentialPolicy {
 	key := gvrKey(gvr)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	// Pick the ConfigMap with the alphabetically earliest "namespace/name" key.
-	var winner *CredentialPolicy
-	var winnerCMKey string
-
-	for cmk, policies := range s.configMapPolicies {
-		if p, ok := policies[key]; ok {
-			if winner == nil || cmk < winnerCMKey {
-				winner = p
-				winnerCMKey = cmk
-			}
-		}
-	}
-	if winner != nil {
-		return winner
-	}
-
 	return s.crdPolicies[key]
-}
-
-// UpdateFromConfigMap replaces the policy entries contributed by a single
-// ConfigMap. Entries that fail to parse are logged and skipped.
-// A warning is logged at write time if the incoming data introduces a GVR
-// that is already defined by another ConfigMap.
-func (s *ConfigStore) UpdateFromConfigMap(namespace, name string, data map[string]string) {
-	key := cmKey(namespace, name)
-	parsed := make(map[string]*CredentialPolicy, len(data))
-
-	for gvr, raw := range data {
-		policy, err := ParseCredentialPolicy(raw)
-		if err != nil {
-			logrus.Errorf("credential-policy configmap %s: invalid entry %q: %v", key, gvr, err)
-			continue
-		}
-		if policy != nil {
-			parsed[gvr] = policy
-		}
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Warn about GVR conflicts at write time (not on every read).
-	for gvr := range parsed {
-		for otherKey, otherPolicies := range s.configMapPolicies {
-			if otherKey == key {
-				continue
-			}
-			if _, exists := otherPolicies[gvr]; exists {
-				logrus.Warnf("credential-policy: GVR %q defined in both ConfigMap %q and %q", gvr, key, otherKey)
-			}
-		}
-	}
-
-	s.configMapPolicies[key] = parsed
-}
-
-// DeleteConfigMap removes all policy entries contributed by the named ConfigMap.
-func (s *ConfigStore) DeleteConfigMap(namespace, name string) {
-	key := cmKey(namespace, name)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.configMapPolicies, key)
 }
 
 // UpdateCRDAnnotation updates or removes the policy derived from a CRD's
