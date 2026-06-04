@@ -102,6 +102,24 @@ func TestOnCRDChange_Nil_NoOp(t *testing.T) {
 	OnCRDChange(store, nil)
 }
 
+func TestOnCRDChange_DeletingCRD_Ignored(t *testing.T) {
+	store := NewConfigStore()
+	crd := makeCRD(
+		"awsclusters.infrastructure.cluster.x-k8s.io",
+		"infrastructure.cluster.x-k8s.io",
+		"awsclusters", "v1beta2",
+		map[string]string{
+			AnnotationKey: `{"credentialRef":{"kind":"Secret","name":".spec.secretRef"}}`,
+		},
+	)
+	now := metav1.Now()
+	crd.DeletionTimestamp = &now
+
+	OnCRDChange(store, crd)
+
+	assert.Nil(t, store.GetPolicy(capaAWSClusterGVR))
+}
+
 func TestOnCRDChange_NoPluralName_Skipped(t *testing.T) {
 	store := NewConfigStore()
 	crd := &apiextensionsv1.CustomResourceDefinition{

@@ -114,7 +114,7 @@ type mockObjectGetter struct {
 }
 
 func (m *mockObjectGetter) Get(gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error) {
-	key := fmt.Sprintf("%s/%s/%s/%s", gvk.Group, gvk.Kind, namespace, name)
+	key := fmt.Sprintf("%s/%s/%s/%s/%s", gvk.Group, gvk.Version, gvk.Kind, namespace, name)
 	obj, ok := m.objects[key]
 	if !ok {
 		return nil, fmt.Errorf("not found: %s", key)
@@ -171,7 +171,7 @@ func TestTraverseCredentialChain_SecretNamespaceDefaultsToObjectNamespace(t *tes
 	assert.Equal(t, "fleet-default", result.secretNamespace)
 }
 
-func TestTraverseCredentialChain_TwoLevelIdentityToSecret(t *testing.T) {
+func TestTraverseCredentialChain_TwoLevelIdentityToSecret_AWSCluster(t *testing.T) {
 	// AWSCluster -> AWSClusterStaticIdentity -> Secret
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -197,7 +197,7 @@ func TestTraverseCredentialChain_TwoLevelIdentityToSecret(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterStaticIdentity//my-static-id": identityObj,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterStaticIdentity//my-static-id": identityObj,
 		},
 	}
 
@@ -218,7 +218,57 @@ func TestTraverseCredentialChain_TwoLevelIdentityToSecret(t *testing.T) {
 	require.NoError(t, result.err)
 	assert.False(t, result.skip)
 	assert.Equal(t, "aws-creds", result.secretName)
-	assert.Equal(t, "capa-system", result.secretNamespace)
+	assert.Equal(t, "cattle-global-data", result.secretNamespace)
+}
+
+func TestTraverseCredentialChain_TwoLevelIdentityToSecret(t *testing.T) {
+	// VSphereCluster -> VSphereClusterIdentity -> Secret
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"spec": map[string]interface{}{
+				"identityRef": map[string]interface{}{
+					"kind": "VSphereClusterIdentity",
+					"name": "my-static-id",
+				},
+			},
+		},
+	}
+
+	identityObj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "infrastructure.cluster.x-k8s.io/v1beta2",
+			"kind":       "VSphereClusterIdentity",
+			"metadata":   map[string]interface{}{"name": "my-static-id"},
+			"spec": map[string]interface{}{
+				"secretRef": "vsphere-creds",
+			},
+		},
+	}
+
+	getter := &mockObjectGetter{
+		objects: map[string]*unstructured.Unstructured{
+			"infrastructure.cluster.x-k8s.io/v1beta2/VSphereClusterIdentity//my-static-id": identityObj,
+		},
+	}
+
+	store := NewConfigStore()
+	store.UpdateCRDAnnotation(
+		"vsphereclusteridentities.infrastructure.cluster.x-k8s.io",
+		schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "vsphereclusteridentities"},
+		`{"credentialRef":{"kind":"Secret","name":".spec.secretRef","namespace":"capv-system"}}`,
+	)
+
+	policy := &CredentialPolicy{CredentialRef: CredentialRef{
+		Kind: ".spec.identityRef.kind", Name: ".spec.identityRef.name",
+	}}
+	gvr := schema.GroupVersionResource{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta2", Resource: "vsphereclusters"}
+
+	result := traverseCredentialChain(obj, gvr, policy, store, getter, "fleet-default")
+
+	require.NoError(t, result.err)
+	assert.False(t, result.skip)
+	assert.Equal(t, "vsphere-creds", result.secretName)
+	assert.Equal(t, "capv-system", result.secretNamespace)
 }
 
 func TestTraverseCredentialChain_EmptyNameSkips(t *testing.T) {
@@ -296,7 +346,7 @@ func TestTraverseCredentialChain_CircularReference(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterRoleIdentity//role-a": roleA,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterRoleIdentity//role-a": roleA,
 		},
 	}
 

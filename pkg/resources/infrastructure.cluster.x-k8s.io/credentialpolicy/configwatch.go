@@ -6,12 +6,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// OnCRDChange updates the ConfigStore when a CustomResourceDefinition is added
-// or updated. Only CRDs in the "infrastructure.cluster.x-k8s.io" group are
-// processed; the AnnotationKey annotation value (empty string if absent) is
+// OnCRDChange updates the ConfigStore when a CustomResourceDefinition is added or updated.
+// Only CRDs in the "infrastructure.cluster.x-k8s.io" API group are processed;
+// the AnnotationKey annotation value (empty string if absent) is
 // used to set or clear the policy for this resource type.
 func OnCRDChange(store *ConfigStore, crd *apiextensionsv1.CustomResourceDefinition) {
-	if crd == nil {
+	if crd == nil || crd.DeletionTimestamp != nil {
 		return
 	}
 	if crd.Spec.Group != "infrastructure.cluster.x-k8s.io" {
@@ -20,10 +20,12 @@ func OnCRDChange(store *ConfigStore, crd *apiextensionsv1.CustomResourceDefiniti
 
 	version := servingVersion(crd)
 	if version == "" {
+		logrus.Warnf("credential-policy: CRD %s has no served version; skipping", crd.Name)
 		return
 	}
 	resource := crd.Spec.Names.Plural
 	if resource == "" {
+		logrus.Warnf("credential-policy: CRD %s has no plural name; skipping", crd.Name)
 		return
 	}
 
@@ -40,10 +42,10 @@ func OnCRDChange(store *ConfigStore, crd *apiextensionsv1.CustomResourceDefiniti
 }
 
 // OnCRDDelete removes ConfigStore entries contributed by a deleted CRD.
-// crdName is the value of the CRD's metadata.name field, which the wrangler
+// crdName is the value of the CRD's metadata.name field, which the Wrangler
 // OnChange handler passes as the key when the object is nil.
 func OnCRDDelete(store *ConfigStore, crdName string) {
-	logrus.Infof("credential-policy: removing CRD annotation for deleted CRD %s", crdName)
+	logrus.Debugf("credential-policy: removing CRD annotation for deleted CRD %s", crdName)
 	store.DeleteCRDAnnotation(crdName)
 }
 

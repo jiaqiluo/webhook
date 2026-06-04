@@ -1,8 +1,6 @@
 package server
 
 import (
-	"context"
-
 	"github.com/rancher/webhook/pkg/admission"
 	"github.com/rancher/webhook/pkg/clients"
 	v3 "github.com/rancher/webhook/pkg/generated/controllers/management.cattle.io/v3"
@@ -38,9 +36,6 @@ import (
 	"github.com/rancher/webhook/pkg/resources/rbac.authorization.k8s.io/v1/role"
 	"github.com/rancher/webhook/pkg/resources/rbac.authorization.k8s.io/v1/rolebinding"
 	"github.com/rancher/webhook/pkg/resources/rke-machine-config.cattle.io/v1/machineconfig"
-	"github.com/sirupsen/logrus"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/labels"
 )
 
 // Validation returns a list of all ValidatingAdmissionHandlers used by the webhook.
@@ -74,28 +69,7 @@ func Validation(clients *clients.Clients) ([]admission.ValidatingAdmissionHandle
 		prtbResolver := resolvers.NewPRTBRuleResolver(clients.Management.ProjectRoleTemplateBinding().Cache(), clients.RoleTemplateResolver)
 		grbResolvers := resolvers.NewGRBRuleResolvers(clients.Management.GlobalRoleBinding().Cache(), clients.GlobalRoleResolver)
 
-		// CAPI credential policy validator — seeded from CRD annotations.
-		credPolicyStore := credentialpolicy.NewConfigStore()
-
-		// Seed from all existing infrastructure.cluster.x-k8s.io CRDs.
-		existingCRDs, crdListErr := clients.CRD.CustomResourceDefinition().Cache().List(labels.Everything())
-		if crdListErr != nil {
-			logrus.Warnf("credential-policy: failed to list CRDs: %v", crdListErr)
-		} else {
-			for _, crd := range existingCRDs {
-				credentialpolicy.OnCRDChange(credPolicyStore, crd)
-			}
-		}
-		// Watch for future CRD additions, updates, and deletions.
-		clients.CRD.CustomResourceDefinition().OnChange(context.Background(), "credential-policy-crd-watcher",
-			func(key string, crd *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
-				if crd == nil {
-					credentialpolicy.OnCRDDelete(credPolicyStore, key)
-				} else {
-					credentialpolicy.OnCRDChange(credPolicyStore, crd)
-				}
-				return nil, nil
-			})
+		credPolicyStore := credentialpolicy.SetupCredentialPolicyStore(clients)
 
 		handlers = append(
 			handlers,

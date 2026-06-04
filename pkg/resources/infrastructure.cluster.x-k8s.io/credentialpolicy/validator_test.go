@@ -295,8 +295,8 @@ func TestAdmitter_ThreeLevelChain_AWS(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
-			"infrastructure.cluster.x-k8s.io/AWSClusterStaticIdentity//my-static-id": staticIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterStaticIdentity//my-static-id": staticIdentity,
 		},
 	}
 
@@ -370,8 +370,8 @@ func TestAdmitter_ThreeLevelChain_AWS_Denied(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
-			"infrastructure.cluster.x-k8s.io/AWSClusterStaticIdentity//my-static-id": staticIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterRoleIdentity//my-role-id":     roleIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterStaticIdentity//my-static-id": staticIdentity,
 		},
 	}
 
@@ -398,7 +398,7 @@ func TestAdmitter_ThreeLevelChain_AWS_Denied(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, resp.Allowed)
 	assert.Contains(t, resp.Result.Message, "does not have permission to get secret")
-	assert.Contains(t, resp.Result.Message, "capa-system/aws-credentials")
+	assert.Contains(t, resp.Result.Message, "cattle-global-data/aws-credentials")
 }
 
 func TestAdmitter_ControllerIdentity_Skip(t *testing.T) {
@@ -423,7 +423,7 @@ func TestAdmitter_ControllerIdentity_Skip(t *testing.T) {
 
 	getter := &mockObjectGetter{
 		objects: map[string]*unstructured.Unstructured{
-			"infrastructure.cluster.x-k8s.io/AWSClusterControllerIdentity//default": controllerIdentity,
+			"infrastructure.cluster.x-k8s.io/v1beta2/AWSClusterControllerIdentity//default": controllerIdentity,
 		},
 	}
 
