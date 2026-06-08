@@ -88,7 +88,8 @@ type resolvedRef struct {
 
 // resolveCredentialRef resolves a CredentialRef against an unstructured object,
 // using the given GVR as the default apiVersion source.
-// Returns an error if any field value uses an unsupported format (e.g. "$" prefix).
+// Returns an error if any coordinate fails to resolve due to a malformed JSONPath
+// expression or other resolution error.
 func resolveCredentialRef(ref CredentialRef, obj *unstructured.Unstructured, sourceGVR schema.GroupVersionResource) (resolvedRef, error) {
 	apiVersion, err := resolveValue(ref.APIVersion, obj)
 	if err != nil {

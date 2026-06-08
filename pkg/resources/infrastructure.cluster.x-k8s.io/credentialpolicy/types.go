@@ -51,7 +51,6 @@ type CredentialRef struct {
 	// Namespace is the namespace coordinate.
 	// Use a literal (e.g. "capa-system") or a dot-path (e.g. ".spec.identityRef.namespace"), or
 	// a JSONPath (e.g. "$.spec.identityRef.namespace").
-	// If empty after resolution, falls back to the namespace of the current object in the chain.
 	Namespace string `json:"namespace,omitempty"`
 
 	// Name is the name coordinate. Required (must resolve to a non-empty value or the

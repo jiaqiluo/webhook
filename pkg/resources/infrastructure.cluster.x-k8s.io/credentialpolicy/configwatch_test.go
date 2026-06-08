@@ -96,7 +96,7 @@ func TestOnCRDChange_NoAnnotation_ClearsExistingEntry(t *testing.T) {
 	assert.Nil(t, store.GetPolicy(capaAWSClusterGVR))
 }
 
-func TestOnCRDChange_Nil_NoOp(t *testing.T) {
+func TestOnCRDChange_Nil_NoOp(_ *testing.T) {
 	store := NewConfigStore()
 	// Must not panic
 	OnCRDChange(store, nil)
@@ -186,7 +186,7 @@ func TestOnCRDDelete_ClearsEntry(t *testing.T) {
 	assert.Nil(t, store.GetPolicy(capaAWSClusterGVR))
 }
 
-func TestOnCRDDelete_UnknownName_NoOp(t *testing.T) {
+func TestOnCRDDelete_UnknownName_NoOp(_ *testing.T) {
 	store := NewConfigStore()
 	// Must not panic
 	OnCRDDelete(store, "nonexistent.crd")

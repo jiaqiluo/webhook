@@ -23,7 +23,7 @@ import (
 // newTestAdmitter creates an admitter with the given store, getter, and a fake SAR client.
 func newTestAdmitter(store *ConfigStore, getter objectGetter, sarAllowed bool) *admitter {
 	fakeClient := fakeclientset.NewSimpleClientset()
-	fakeClient.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	fakeClient.PrependReactor("create", "subjectaccessreviews", func(_ k8stesting.Action) (bool, runtime.Object, error) {
 		return true, &authorizationv1api.SubjectAccessReview{
 			Status: authorizationv1api.SubjectAccessReviewStatus{
 				Allowed: sarAllowed,
